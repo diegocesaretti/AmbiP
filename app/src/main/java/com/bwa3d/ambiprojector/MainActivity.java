@@ -2,12 +2,14 @@ package com.bwa3d.ambiprojector;
 
 import android.Manifest;
 import android.content.pm.PackageManager;
+import android.graphics.Color;
 import android.os.Bundle;
 import android.util.Log;
 import android.util.Size;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.FrameLayout;
+import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -33,9 +35,13 @@ public final class MainActivity extends ComponentActivity {
     private FrameLayout root;
     private AmbilightView ambilightView;
     private PreviewView previewView;
+    private FrameLayout calibrationContainer;
+    private ScreenCalibrationView calibrationView;
+    private LinearLayout calibrationToolbar;
     private FrameAnalyzer analyzer;
     private ExecutorService cameraExecutor;
     private boolean previewVisible = false;
+    private boolean calibrating = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -46,6 +52,15 @@ public final class MainActivity extends ComponentActivity {
             analyzer = new FrameAnalyzer(state -> runOnUiThread(() -> {
                 if (ambilightView != null) ambilightView.setState(state);
             }));
+            analyzer.setDetectionListener((corners, confidence) -> runOnUiThread(() -> {
+                if (calibrationView != null) calibrationView.setCorners(corners);
+                Toast.makeText(this,
+                        String.format("Auto detect %.0f%% confidence", confidence * 100f),
+                        Toast.LENGTH_SHORT).show();
+            }));
+            calibrationView.setListener(c -> {
+                if (analyzer != null) analyzer.setCorners(c);
+            });
 
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
                     == PackageManager.PERMISSION_GRANTED) {
@@ -61,43 +76,128 @@ public final class MainActivity extends ComponentActivity {
 
     private void buildUi() {
         root = new FrameLayout(this);
-        root.setBackgroundColor(android.graphics.Color.BLACK);
+        root.setBackgroundColor(Color.BLACK);
 
         ambilightView = new AmbilightView(this);
         root.addView(ambilightView, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT));
 
+        // Camera preview is kept in a true 4:3 viewport so calibration coordinates map 1:1
+        // to the 640x480 analysis frame.
+        calibrationContainer = new FrameLayout(this);
+        calibrationContainer.setBackgroundColor(Color.BLACK);
+        int sw = getResources().getDisplayMetrics().widthPixels;
+        int sh = getResources().getDisplayMetrics().heightPixels;
+        int cw = Math.min(sw, Math.round(sh * 4f / 3f));
+        int ch = Math.min(sh, Math.round(cw * 3f / 4f));
+        FrameLayout.LayoutParams cp = new FrameLayout.LayoutParams(cw, ch);
+        cp.gravity = Gravity.CENTER;
+        root.addView(calibrationContainer, cp);
+
         previewView = new PreviewView(this);
         previewView.setScaleType(PreviewView.ScaleType.FIT_CENTER);
         previewView.setImplementationMode(PreviewView.ImplementationMode.COMPATIBLE);
-        previewView.setVisibility(View.GONE);
-        FrameLayout.LayoutParams pp = new FrameLayout.LayoutParams(dp(300), dp(190));
-        pp.gravity = Gravity.END | Gravity.BOTTOM;
-        pp.setMargins(dp(12), dp(12), dp(12), dp(12));
-        root.addView(previewView, pp);
+        calibrationContainer.addView(previewView, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT));
+
+        calibrationView = new ScreenCalibrationView(this);
+        calibrationView.setVisibility(View.GONE);
+        calibrationContainer.addView(calibrationView, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT));
+
+        calibrationContainer.setVisibility(View.GONE);
+
+        calibrationToolbar = new LinearLayout(this);
+        calibrationToolbar.setOrientation(LinearLayout.HORIZONTAL);
+        calibrationToolbar.setGravity(Gravity.CENTER);
+        calibrationToolbar.setPadding(dp(8), dp(8), dp(8), dp(8));
+        calibrationToolbar.setBackgroundColor(0xBB000000);
+        calibrationToolbar.addView(makeButton("AUTO", v -> {
+            if (analyzer != null) {
+                analyzer.requestAutoDetect();
+                Toast.makeText(this, "Looking for TV borders…", Toast.LENGTH_SHORT).show();
+            }
+        }));
+        calibrationToolbar.addView(makeButton("RESET", v -> {
+            float[] c = new float[]{0.15f,0.20f, 0.85f,0.20f, 0.85f,0.80f, 0.15f,0.80f};
+            calibrationView.setCorners(c);
+            if (analyzer != null) analyzer.setCorners(c);
+        }));
+        calibrationToolbar.addView(makeButton("DONE", v -> exitCalibration()));
+        FrameLayout.LayoutParams tb = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT);
+        tb.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
+        tb.topMargin = dp(10);
+        calibrationToolbar.setVisibility(View.GONE);
+        root.addView(calibrationToolbar, tb);
 
         ambilightView.setGestureListener(new AmbilightView.GestureListener() {
             @Override public void onSingleTap() {
+                if (calibrating) return;
                 previewVisible = !previewVisible;
-                previewView.setVisibility(previewVisible ? View.VISIBLE : View.GONE);
+                if (previewVisible) {
+                    calibrationContainer.setVisibility(View.VISIBLE);
+                    calibrationView.setVisibility(View.GONE);
+                    // Small debug preview isn't worth remapping; show the full 4:3 viewport.
+                    Toast.makeText(MainActivity.this, "Camera preview · tap again to hide", Toast.LENGTH_SHORT).show();
+                } else {
+                    calibrationContainer.setVisibility(View.GONE);
+                }
             }
 
             @Override public void onLongPress() {
-                if (analyzer == null) return;
-                float next = analyzer.getCropScale() + 0.10f;
-                if (next > 0.98f) next = 0.50f;
-                analyzer.setCropScale(next);
-                Toast.makeText(MainActivity.this,
-                        String.format("TV crop %.0f%%", next * 100f), Toast.LENGTH_SHORT).show();
+                enterCalibration();
             }
 
             @Override public void onDoubleTap() {
-                ambilightView.showContextOverlay("Context layer ready · demo text", 4000);
+                ambilightView.showContextDemo(6000);
             }
         });
 
         setContentView(root);
+    }
+
+    private TextView makeButton(String text, View.OnClickListener listener) {
+        TextView b = new TextView(this);
+        b.setText(text);
+        b.setTextColor(Color.WHITE);
+        b.setTextSize(16f);
+        b.setGravity(Gravity.CENTER);
+        b.setPadding(dp(18), dp(10), dp(18), dp(10));
+        b.setBackgroundColor(0xAA333333);
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        p.setMargins(dp(5), 0, dp(5), 0);
+        b.setLayoutParams(p);
+        b.setOnClickListener(listener);
+        return b;
+    }
+
+    private void enterCalibration() {
+        if (analyzer == null) return;
+        calibrating = true;
+        previewVisible = true;
+        calibrationContainer.setVisibility(View.VISIBLE);
+        calibrationView.setCorners(analyzer.getCorners());
+        calibrationView.setVisibility(View.VISIBLE);
+        calibrationToolbar.setVisibility(View.VISIBLE);
+        ambilightView.setVisibility(View.GONE);
+        Toast.makeText(this, "Drag each corner onto the TV, or tap AUTO", Toast.LENGTH_LONG).show();
+    }
+
+    private void exitCalibration() {
+        calibrating = false;
+        previewVisible = false;
+        calibrationView.setVisibility(View.GONE);
+        calibrationToolbar.setVisibility(View.GONE);
+        calibrationContainer.setVisibility(View.GONE);
+        ambilightView.setVisibility(View.VISIBLE);
+        Toast.makeText(this, "Screen borders saved for this session", Toast.LENGTH_SHORT).show();
     }
 
     private void startCameraSafely() {
@@ -115,7 +215,9 @@ public final class MainActivity extends ComponentActivity {
                 ProcessCameraProvider provider = future.get();
                 provider.unbindAll();
 
-                Preview preview = new Preview.Builder().build();
+                Preview preview = new Preview.Builder()
+                        .setTargetResolution(new Size(640, 480))
+                        .build();
                 preview.setSurfaceProvider(previewView.getSurfaceProvider());
 
                 ImageAnalysis analysis = new ImageAnalysis.Builder()
@@ -156,8 +258,8 @@ public final class MainActivity extends ComponentActivity {
         runOnUiThread(() -> {
             try {
                 TextView error = new TextView(this);
-                error.setTextColor(android.graphics.Color.WHITE);
-                error.setBackgroundColor(android.graphics.Color.BLACK);
+                error.setTextColor(Color.WHITE);
+                error.setBackgroundColor(Color.BLACK);
                 error.setTextSize(15f);
                 error.setPadding(dp(18), dp(18), dp(18), dp(18));
                 String msg = t.getClass().getName() + "\n" +
