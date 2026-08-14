@@ -19,16 +19,13 @@ public final class FrameAnalyzer implements ImageAnalysis.Analyzer {
     });
     private volatile boolean autoDetectRequested = false;
 
-    // Temporal behavior.
     private volatile float smoothing = 0.68f;
-
-    // Capture-side software correction. Real exposure is controlled by CameraX in MainActivity.
     private volatile float captureContrast = 1.0f;
     private volatile float captureSaturation = 1.0f;
-
-    // Projected ambient-light tuning, intentionally independent of capture correction.
     private volatile float ambientBrightness = 1.0f;
     private volatile float ambientContrast = 1.0f;
+    // -1 = warmer, 0 = neutral, +1 = cooler. Applied only to projected ambient color.
+    private volatile float ambientColorTemperature = 0.0f;
 
     private final float[][] smoothTop = new float[AmbilightState.H_SEGMENTS][3];
     private final float[][] smoothBottom = new float[AmbilightState.H_SEGMENTS][3];
@@ -63,6 +60,8 @@ public final class FrameAnalyzer implements ImageAnalysis.Analyzer {
     public float getAmbientBrightness() { return ambientBrightness; }
     public void setAmbientContrast(float value) { ambientContrast = clamp(value, 0.45f, 2.2f); }
     public float getAmbientContrast() { return ambientContrast; }
+    public void setAmbientColorTemperature(float value) { ambientColorTemperature = clamp(value, -1f, 1f); }
+    public float getAmbientColorTemperature() { return ambientColorTemperature; }
 
     @Override
     public void analyze(@NonNull ImageProxy image) {
@@ -136,7 +135,6 @@ public final class FrameAnalyzer implements ImageAnalysis.Analyzer {
                 int py = clampInt(Math.round(fy * (frameH - 1)), 0, frameH - 1);
                 int p = py * rowStride + px * pixelStride;
                 if (p < 0 || p + 3 >= buffer.limit()) continue;
-                // CameraX OUTPUT_IMAGE_FORMAT_RGBA_8888 is R,G,B,A in plane 0.
                 int rr = buffer.get(p) & 0xFF;
                 int gg = buffer.get(p + 1) & 0xFF;
                 int bb = buffer.get(p + 2) & 0xFF;
@@ -148,7 +146,7 @@ public final class FrameAnalyzer implements ImageAnalysis.Analyzer {
         return out;
     }
 
-    /** Apply capture correction first, then the independent projected-ambient tone curve. */
+    /** Apply capture correction first, then independent projected-ambient tuning. */
     private int tuneColor(int r, int g, int b) {
         float cr = contrast(r, captureContrast);
         float cg = contrast(g, captureContrast);
@@ -162,6 +160,20 @@ public final class FrameAnalyzer implements ImageAnalysis.Analyzer {
         cr = contrast(cr, ambientContrast) * ambientBrightness;
         cg = contrast(cg, ambientContrast) * ambientBrightness;
         cb = contrast(cb, ambientContrast) * ambientBrightness;
+
+        // Projection color temperature. Warm suppresses blue and slightly boosts red;
+        // cool does the inverse. Green moves only slightly to preserve luminance.
+        float t = ambientColorTemperature;
+        if (t < 0f) {
+            float warm = -t;
+            cr *= 1f + 0.22f * warm;
+            cg *= 1f + 0.035f * warm;
+            cb *= 1f - 0.28f * warm;
+        } else if (t > 0f) {
+            cr *= 1f - 0.22f * t;
+            cg *= 1f + 0.015f * t;
+            cb *= 1f + 0.28f * t;
+        }
 
         int rr = clampInt(Math.round(cr), 0, 255);
         int gg = clampInt(Math.round(cg), 0, 255);
@@ -180,7 +192,6 @@ public final class FrameAnalyzer implements ImageAnalysis.Analyzer {
         int yStart = (int)(h * 0.06f), yEnd = (int)(h * 0.94f);
         float[] vScore = new float[w];
         float[] hScore = new float[h];
-
         for (int x = xStart + 2; x < xEnd - 2; x += step) {
             long sum = 0; int n = 0;
             for (int y = yStart; y < yEnd; y += step) {
@@ -199,7 +210,6 @@ public final class FrameAnalyzer implements ImageAnalysis.Analyzer {
             }
             hScore[y] = n == 0 ? 0 : (float)sum/n;
         }
-
         int left = bestPeak(vScore,xStart,(int)(w*0.48f),step);
         int right = bestPeak(vScore,(int)(w*0.52f),xEnd,step);
         int top = bestPeak(hScore,yStart,(int)(h*0.48f),step);
@@ -218,9 +228,7 @@ public final class FrameAnalyzer implements ImageAnalysis.Analyzer {
 
     private int bestPeak(float[] scores,int from,int to,int step) {
         float best=7f; int idx=-1;
-        for(int i=Math.max(0,from);i<Math.min(scores.length,to);i+=step) {
-            if(scores[i]>best){best=scores[i];idx=i;}
-        }
+        for(int i=Math.max(0,from);i<Math.min(scores.length,to);i+=step) if(scores[i]>best){best=scores[i];idx=i;}
         return idx;
     }
 
@@ -237,22 +245,12 @@ public final class FrameAnalyzer implements ImageAnalysis.Analyzer {
         for(int i=0;i<colors.length;i++) {
             float r=(colors[i]>>16)&0xFF, g=(colors[i]>>8)&0xFF, b=colors[i]&0xFF;
             if(!smoothingPrimed){memory[i][0]=r;memory[i][1]=g;memory[i][2]=b;}
-            else {
-                memory[i][0]=memory[i][0]*oldW+r*newW;
-                memory[i][1]=memory[i][1]*oldW+g*newW;
-                memory[i][2]=memory[i][2]*oldW+b*newW;
-            }
-            colors[i]=0xFF000000|(clampInt(Math.round(memory[i][0]),0,255)<<16)
-                    |(clampInt(Math.round(memory[i][1]),0,255)<<8)
-                    |clampInt(Math.round(memory[i][2]),0,255);
+            else {memory[i][0]=memory[i][0]*oldW+r*newW;memory[i][1]=memory[i][1]*oldW+g*newW;memory[i][2]=memory[i][2]*oldW+b*newW;}
+            colors[i]=0xFF000000|(clampInt(Math.round(memory[i][0]),0,255)<<16)|(clampInt(Math.round(memory[i][1]),0,255)<<8)|clampInt(Math.round(memory[i][2]),0,255);
         }
     }
 
-    private float estimateWidth(float[] c) {
-        float top=dist(c[0],c[1],c[2],c[3]);
-        float bottom=dist(c[6],c[7],c[4],c[5]);
-        return clamp((top+bottom)*0.5f,0f,1f);
-    }
+    private float estimateWidth(float[] c) { float top=dist(c[0],c[1],c[2],c[3]); float bottom=dist(c[6],c[7],c[4],c[5]); return clamp((top+bottom)*0.5f,0f,1f); }
     private float dist(float x0,float y0,float x1,float y1){float dx=x1-x0,dy=y1-y0;return(float)Math.sqrt(dx*dx+dy*dy);}
     private void updateFps(){fpsFrames++;long now=System.nanoTime();long elapsed=now-fpsWindowStart;if(elapsed>=700_000_000L){fps=(float)(fpsFrames*1_000_000_000.0/elapsed);fpsFrames=0;fpsWindowStart=now;}}
     private static float clamp(float v,float lo,float hi){return Math.max(lo,Math.min(hi,v));}
