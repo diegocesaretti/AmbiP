@@ -7,7 +7,7 @@ import androidx.camera.core.ImageProxy;
 import java.nio.ByteBuffer;
 import java.util.concurrent.atomic.AtomicReference;
 
-/** CPU-light analyzer with manual quadrilateral calibration and a simple auto detector. */
+/** CPU-light analyzer with screen calibration and independent capture/projection tuning. */
 public final class FrameAnalyzer implements ImageAnalysis.Analyzer {
     public interface Listener { void onAmbilightFrame(AmbilightState state); }
     public interface DetectionListener { void onDetected(float[] corners, float confidence); }
@@ -15,11 +15,20 @@ public final class FrameAnalyzer implements ImageAnalysis.Analyzer {
     private final Listener listener;
     private volatile DetectionListener detectionListener;
     private final AtomicReference<float[]> corners = new AtomicReference<>(new float[]{
-            0.15f, 0.20f,  0.85f, 0.20f,  0.85f, 0.80f,  0.15f,0.80f
+            0.15f, 0.20f,  0.85f, 0.20f,  0.85f, 0.80f,  0.15f, 0.80f
     });
     private volatile boolean autoDetectRequested = false;
+
+    // Temporal behavior.
     private volatile float smoothing = 0.68f;
-    private volatile float brightness = 1.0f;
+
+    // Capture-side software correction. Real exposure is controlled by CameraX in MainActivity.
+    private volatile float captureContrast = 1.0f;
+    private volatile float captureSaturation = 1.0f;
+
+    // Projected ambient-light tuning, intentionally independent of capture correction.
+    private volatile float ambientBrightness = 1.0f;
+    private volatile float ambientContrast = 1.0f;
 
     private final float[][] smoothTop = new float[AmbilightState.H_SEGMENTS][3];
     private final float[][] smoothBottom = new float[AmbilightState.H_SEGMENTS][3];
@@ -43,10 +52,17 @@ public final class FrameAnalyzer implements ImageAnalysis.Analyzer {
 
     public float[] getCorners() { return corners.get().clone(); }
     public void requestAutoDetect() { autoDetectRequested = true; }
-    public void setSmoothing(float value) { smoothing = clamp(value, 0f, 0.95f); }
+
+    public void setSmoothing(float value) { smoothing = clamp(value, 0f, 0.96f); }
     public float getSmoothing() { return smoothing; }
-    public void setBrightness(float value) { brightness = clamp(value, 0.25f, 2.0f); }
-    public float getBrightness() { return brightness; }
+    public void setCaptureContrast(float value) { captureContrast = clamp(value, 0.45f, 2.2f); }
+    public float getCaptureContrast() { return captureContrast; }
+    public void setCaptureSaturation(float value) { captureSaturation = clamp(value, 0f, 2.2f); }
+    public float getCaptureSaturation() { return captureSaturation; }
+    public void setAmbientBrightness(float value) { ambientBrightness = clamp(value, 0.15f, 2.0f); }
+    public float getAmbientBrightness() { return ambientBrightness; }
+    public void setAmbientContrast(float value) { ambientContrast = clamp(value, 0.45f, 2.2f); }
+    public float getAmbientContrast() { return ambientContrast; }
 
     @Override
     public void analyze(@NonNull ImageProxy image) {
@@ -127,12 +143,34 @@ public final class FrameAnalyzer implements ImageAnalysis.Analyzer {
                 r += rr; g += gg; b += bb; count++;
             }
             if (count == 0) out[s] = 0xFF000000;
-            else out[s] = 0xFF000000
-                    | (tone((int)(r / count)) << 16)
-                    | (tone((int)(g / count)) << 8)
-                    | tone((int)(b / count));
+            else out[s] = tuneColor((int)(r / count), (int)(g / count), (int)(b / count));
         }
         return out;
+    }
+
+    /** Apply capture correction first, then the independent projected-ambient tone curve. */
+    private int tuneColor(int r, int g, int b) {
+        float cr = contrast(r, captureContrast);
+        float cg = contrast(g, captureContrast);
+        float cb = contrast(b, captureContrast);
+
+        float luma = cr * 0.2126f + cg * 0.7152f + cb * 0.0722f;
+        cr = luma + (cr - luma) * captureSaturation;
+        cg = luma + (cg - luma) * captureSaturation;
+        cb = luma + (cb - luma) * captureSaturation;
+
+        cr = contrast(cr, ambientContrast) * ambientBrightness;
+        cg = contrast(cg, ambientContrast) * ambientBrightness;
+        cb = contrast(cb, ambientContrast) * ambientBrightness;
+
+        int rr = clampInt(Math.round(cr), 0, 255);
+        int gg = clampInt(Math.round(cg), 0, 255);
+        int bb = clampInt(Math.round(cb), 0, 255);
+        return 0xFF000000 | (rr << 16) | (gg << 8) | bb;
+    }
+
+    private float contrast(float value, float amount) {
+        return (value - 128f) * amount + 128f;
     }
 
     private DetectionResult detectScreen(ByteBuffer buffer, int rowStride, int pixelStride,
@@ -193,8 +231,6 @@ public final class FrameAnalyzer implements ImageAnalysis.Analyzer {
         int r=b.get(p)&0xFF, g=b.get(p+1)&0xFF, bl=b.get(p+2)&0xFF;
         return (r*54+g*183+bl*19)>>8;
     }
-
-    private int tone(int value) { return clampInt(Math.round(value * brightness), 0, 255); }
 
     private void applySmoothing(int[] colors,float[][] memory) {
         float oldW=smoothing, newW=1f-oldW;
