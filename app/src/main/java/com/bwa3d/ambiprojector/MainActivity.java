@@ -3,21 +3,22 @@ package com.bwa3d.ambiprojector;
 import android.Manifest;
 import android.content.pm.PackageManager;
 import android.os.Bundle;
+import android.util.Log;
+import android.util.Size;
 import android.view.Gravity;
 import android.view.View;
-import android.view.WindowInsets;
-import android.view.WindowInsetsController;
 import android.widget.FrameLayout;
+import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.activity.ComponentActivity;
-import androidx.activity.result.ActivityResultLauncher;
-import androidx.activity.result.contract.ActivityResultContracts;
+import androidx.annotation.NonNull;
 import androidx.camera.core.CameraSelector;
 import androidx.camera.core.ImageAnalysis;
 import androidx.camera.core.Preview;
 import androidx.camera.lifecycle.ProcessCameraProvider;
 import androidx.camera.view.PreviewView;
+import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
 import com.google.common.util.concurrent.ListenableFuture;
@@ -26,6 +27,9 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public final class MainActivity extends ComponentActivity {
+    private static final String TAG = "AmbiProjector";
+    private static final int CAMERA_REQUEST = 1001;
+
     private FrameLayout root;
     private AmbilightView ambilightView;
     private PreviewView previewView;
@@ -33,32 +37,36 @@ public final class MainActivity extends ComponentActivity {
     private ExecutorService cameraExecutor;
     private boolean previewVisible = false;
 
-    private final ActivityResultLauncher<String> permissionLauncher =
-            registerForActivityResult(new ActivityResultContracts.RequestPermission(), granted -> {
-                if (granted) startCamera();
-                else Toast.makeText(this, "Camera permission is required", Toast.LENGTH_LONG).show();
-            });
-
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        enterImmersive();
-        cameraExecutor = Executors.newSingleThreadExecutor();
-        buildUi();
-        analyzer = new FrameAnalyzer(state -> runOnUiThread(() -> ambilightView.setState(state)));
+        try {
+            cameraExecutor = Executors.newSingleThreadExecutor();
+            buildUi();
+            analyzer = new FrameAnalyzer(state -> runOnUiThread(() -> {
+                if (ambilightView != null) ambilightView.setState(state);
+            }));
 
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
-            startCamera();
-        } else {
-            permissionLauncher.launch(Manifest.permission.CAMERA);
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
+                    == PackageManager.PERMISSION_GRANTED) {
+                startCameraSafely();
+            } else {
+                ActivityCompat.requestPermissions(this,
+                        new String[]{Manifest.permission.CAMERA}, CAMERA_REQUEST);
+            }
+        } catch (Throwable t) {
+            showFatalError("Startup", t);
         }
     }
 
     private void buildUi() {
         root = new FrameLayout(this);
+        root.setBackgroundColor(android.graphics.Color.BLACK);
+
         ambilightView = new AmbilightView(this);
         root.addView(ambilightView, new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT));
 
         previewView = new PreviewView(this);
         previewView.setScaleType(PreviewView.ScaleType.FIT_CENTER);
@@ -92,8 +100,16 @@ public final class MainActivity extends ComponentActivity {
         setContentView(root);
     }
 
+    private void startCameraSafely() {
+        try {
+            startCamera();
+        } catch (Throwable t) {
+            showFatalError("Camera setup", t);
+        }
+    }
+
     private void startCamera() {
-        ListenableFuture<ProcessCameraProvider> future = ProcessCameraProvider.getInstance(this);
+        final ListenableFuture<ProcessCameraProvider> future = ProcessCameraProvider.getInstance(this);
         future.addListener(() -> {
             try {
                 ProcessCameraProvider provider = future.get();
@@ -103,45 +119,64 @@ public final class MainActivity extends ComponentActivity {
                 preview.setSurfaceProvider(previewView.getSurfaceProvider());
 
                 ImageAnalysis analysis = new ImageAnalysis.Builder()
+                        .setTargetResolution(new Size(640, 480))
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                         .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
-                        .setOutputImageRotationEnabled(true)
                         .build();
                 analysis.setAnalyzer(cameraExecutor, analyzer);
 
-                provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis);
-            } catch (Exception e) {
-                Toast.makeText(this, "Camera error: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                provider.bindToLifecycle(this,
+                        CameraSelector.DEFAULT_BACK_CAMERA,
+                        preview,
+                        analysis);
+            } catch (Throwable t) {
+                Log.e(TAG, "Camera failed", t);
+                showFatalError("Camera", t);
             }
         }, ContextCompat.getMainExecutor(this));
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode,
+                                           @NonNull String[] permissions,
+                                           @NonNull int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == CAMERA_REQUEST) {
+            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                startCameraSafely();
+            } else {
+                Toast.makeText(this,
+                        "Camera permission is required", Toast.LENGTH_LONG).show();
+            }
+        }
+    }
+
+    private void showFatalError(String stage, Throwable t) {
+        Log.e(TAG, stage + " failure", t);
+        runOnUiThread(() -> {
+            try {
+                TextView error = new TextView(this);
+                error.setTextColor(android.graphics.Color.WHITE);
+                error.setBackgroundColor(android.graphics.Color.BLACK);
+                error.setTextSize(15f);
+                error.setPadding(dp(18), dp(18), dp(18), dp(18));
+                String msg = t.getClass().getName() + "\n" +
+                        (t.getMessage() == null ? "(no message)" : t.getMessage());
+                error.setText("Ambi Projector diagnostic\n\n" + stage + " error:\n" + msg);
+                setContentView(error);
+            } catch (Throwable ignored) {
+                Toast.makeText(this, stage + " error", Toast.LENGTH_LONG).show();
+            }
+        });
     }
 
     private int dp(int value) {
         return Math.round(value * getResources().getDisplayMetrics().density);
     }
 
-    private void enterImmersive() {
-        if (android.os.Build.VERSION.SDK_INT >= 30) {
-            getWindow().setDecorFitsSystemWindows(false);
-            WindowInsetsController c = getWindow().getInsetsController();
-            if (c != null) {
-                c.hide(WindowInsets.Type.statusBars() | WindowInsets.Type.navigationBars());
-                c.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
-            }
-        } else {
-            getWindow().getDecorView().setSystemUiVisibility(
-                    View.SYSTEM_UI_FLAG_FULLSCREEN
-                            | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                            | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                            | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                            | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                            | View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
-        }
-    }
-
     @Override
     protected void onDestroy() {
         super.onDestroy();
-        if (cameraExecutor != null) cameraExecutor.shutdown();
+        if (cameraExecutor != null) cameraExecutor.shutdownNow();
     }
 }
