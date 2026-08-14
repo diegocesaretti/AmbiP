@@ -14,16 +14,19 @@ import android.view.View;
 
 import androidx.annotation.NonNull;
 
-/**
- * Projection output layer.
- * Today: ambient halo + black TV mask + debug HUD.
- * Later: projection mapping, notifications and contextual text are separate overlays here.
- */
+/** Projection output layer: ambient halo, TV mask and four contextual text zones. */
 public final class AmbilightView extends View {
     public interface GestureListener {
         void onSingleTap();
         void onLongPress();
         void onDoubleTap();
+    }
+
+    public enum Zone { TOP, BOTTOM, LEFT, RIGHT }
+
+    private static final class Overlay {
+        String text;
+        long until;
     }
 
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -32,10 +35,10 @@ public final class AmbilightView extends View {
     private volatile AmbilightState state = AmbilightState.black();
     private boolean debug = true;
     private GestureListener gestureListener;
-
-    private String overlayText = null;
-    private long overlayUntil = 0L;
-
+    private final Overlay topOverlay = new Overlay();
+    private final Overlay bottomOverlay = new Overlay();
+    private final Overlay leftOverlay = new Overlay();
+    private final Overlay rightOverlay = new Overlay();
     private float maskWidthRatio = 0.60f;
 
     public AmbilightView(Context context) {
@@ -64,9 +67,30 @@ public final class AmbilightView extends View {
     public boolean isDebug() { return debug; }
 
     public void showContextOverlay(String text, long durationMs) {
-        overlayText = text;
-        overlayUntil = SystemClock.uptimeMillis() + durationMs;
+        showContextOverlay(Zone.TOP, text, durationMs);
+    }
+
+    public void showContextOverlay(Zone zone, String text, long durationMs) {
+        Overlay o = overlay(zone);
+        o.text = text;
+        o.until = SystemClock.uptimeMillis() + durationMs;
         invalidate();
+    }
+
+    public void showContextDemo(long durationMs) {
+        showContextOverlay(Zone.TOP, "TOP · title / score / status", durationMs);
+        showContextOverlay(Zone.BOTTOM, "BOTTOM · subtitles / extra info", durationMs);
+        showContextOverlay(Zone.LEFT, "LEFT\ncontext\nzone", durationMs);
+        showContextOverlay(Zone.RIGHT, "RIGHT\nalerts\nzone", durationMs);
+    }
+
+    private Overlay overlay(Zone zone) {
+        switch (zone) {
+            case BOTTOM: return bottomOverlay;
+            case LEFT: return leftOverlay;
+            case RIGHT: return rightOverlay;
+            default: return topOverlay;
+        }
     }
 
     @Override
@@ -87,7 +111,7 @@ public final class AmbilightView extends View {
         paint.setColor(Color.BLACK);
         canvas.drawRect(tv, paint);
 
-        drawContextOverlay(canvas, tv);
+        drawContextZones(canvas, tv);
         if (debug) drawDebug(canvas, tv);
     }
 
@@ -147,19 +171,43 @@ public final class AmbilightView extends View {
         }
     }
 
-    private void drawContextOverlay(Canvas canvas, RectF tv) {
-        if (overlayText == null || SystemClock.uptimeMillis() > overlayUntil) {
-            overlayText = null;
-            return;
-        }
-        textPaint.setTextSize(Math.max(22f, getHeight() * 0.038f));
+    private void drawContextZones(Canvas canvas, RectF tv) {
+        long now = SystemClock.uptimeMillis();
         textPaint.setColor(Color.WHITE);
         textPaint.setShadowLayer(10f, 0f, 2f, Color.BLACK);
-        float x = tv.left;
-        float y = Math.max(textPaint.getTextSize() + 12f, tv.top - 24f);
-        canvas.drawText(overlayText, x, y, textPaint);
+        textPaint.setTextSize(Math.max(20f, getHeight() * 0.032f));
+
+        drawHorizontalOverlay(canvas, topOverlay, now, tv.centerX(), Math.max(textPaint.getTextSize()+12f, tv.top*0.55f), Paint.Align.CENTER);
+        drawHorizontalOverlay(canvas, bottomOverlay, now, tv.centerX(), tv.bottom + (getHeight()-tv.bottom)*0.55f, Paint.Align.CENTER);
+        drawVerticalOverlay(canvas, leftOverlay, now, Math.max(14f, tv.left*0.18f), tv.centerY(), Paint.Align.LEFT);
+        drawVerticalOverlay(canvas, rightOverlay, now, getWidth()-Math.max(14f, (getWidth()-tv.right)*0.18f), tv.centerY(), Paint.Align.RIGHT);
+
         textPaint.clearShadowLayer();
-        postInvalidateDelayed(250);
+        if (isAnyOverlayAlive(now)) postInvalidateDelayed(200);
+    }
+
+    private void drawHorizontalOverlay(Canvas c, Overlay o, long now, float x, float y, Paint.Align align) {
+        if (!alive(o, now)) return;
+        textPaint.setTextAlign(align);
+        c.drawText(o.text == null ? "" : o.text.replace("\n", " "), x, y, textPaint);
+    }
+
+    private void drawVerticalOverlay(Canvas c, Overlay o, long now, float x, float centerY, Paint.Align align) {
+        if (!alive(o, now)) return;
+        textPaint.setTextAlign(align);
+        String[] lines = (o.text == null ? "" : o.text).split("\\n");
+        float line = textPaint.getTextSize()*1.25f;
+        float y = centerY - (lines.length-1)*line*0.5f;
+        for (String s : lines) { c.drawText(s, x, y, textPaint); y += line; }
+    }
+
+    private boolean alive(Overlay o, long now) {
+        if (o.text == null || now > o.until) { o.text = null; return false; }
+        return true;
+    }
+
+    private boolean isAnyOverlayAlive(long now) {
+        return alive(topOverlay, now) || alive(bottomOverlay, now) || alive(leftOverlay, now) || alive(rightOverlay, now);
     }
 
     private void drawDebug(Canvas canvas, RectF tv) {
@@ -170,15 +218,15 @@ public final class AmbilightView extends View {
         canvas.drawRect(tv, paint);
         paint.setStyle(Paint.Style.FILL);
 
+        textPaint.setTextAlign(Paint.Align.LEFT);
         textPaint.setTextSize(Math.max(15f, getHeight() * 0.022f));
         textPaint.setColor(Color.WHITE);
         float x = 18f;
         float y = 28f;
         float line = textPaint.getTextSize() * 1.35f;
-        canvas.drawText("Ambi Projector v0.1", x, y, textPaint); y += line;
+        canvas.drawText("Ambi Projector v0.2", x, y, textPaint); y += line;
         canvas.drawText(String.format("Camera: %dx%d   %.1f fps", state.sourceWidth, state.sourceHeight, state.fps), x, y, textPaint); y += line;
-        canvas.drawText(String.format("TV crop: %.0f%%", state.cropScale * 100f), x, y, textPaint); y += line;
-        canvas.drawText("Tap: camera preview  |  Long: crop  |  Double: text overlay", x, y, textPaint);
+        canvas.drawText("Tap: preview  |  Long: calibrate  |  Double: 4 text zones", x, y, textPaint);
     }
 
     @Override
