@@ -4,8 +4,9 @@ import java.util.Arrays;
 
 /** Immutable-ish frame state handed from the analyzer to the renderer. */
 public final class AmbilightState {
-    public static final int H_SEGMENTS = 16;
-    public static final int V_SEGMENTS = 9;
+    // v0.6: doubled spatial sampling for smoother, more detailed gradients.
+    public static final int H_SEGMENTS = 32;
+    public static final int V_SEGMENTS = 18;
 
     public final int[] top = new int[H_SEGMENTS];
     public final int[] bottom = new int[H_SEGMENTS];
