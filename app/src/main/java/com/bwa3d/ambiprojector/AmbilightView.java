@@ -15,7 +15,7 @@ import android.view.View;
 
 import androidx.annotation.NonNull;
 
-/** Projection output layer: continuous ambient halo, TV mask and four contextual text zones. */
+/** Projection output layer: continuous ambient halo, TV mask, black outer vignette and four text zones. */
 public final class AmbilightView extends View {
     public interface GestureListener {
         void onSingleTap();
@@ -37,6 +37,7 @@ public final class AmbilightView extends View {
     private final Overlay leftOverlay = new Overlay();
     private final Overlay rightOverlay = new Overlay();
     private float maskWidthRatio = 0.60f;
+    private float outerFadeRatio = 0.16f;
 
     public AmbilightView(Context context) {
         super(context);
@@ -54,6 +55,8 @@ public final class AmbilightView extends View {
     public void setState(AmbilightState newState) { state = newState; postInvalidateOnAnimation(); }
     public void setDebug(boolean enabled) { debug = enabled; invalidate(); }
     public boolean isDebug() { return debug; }
+    public void setOuterFadeRatio(float value) { outerFadeRatio = clamp(value, 0.02f, 0.42f); invalidate(); }
+    public float getOuterFadeRatio() { return outerFadeRatio; }
 
     public void showContextOverlay(String text, long durationMs) { showContextOverlay(Zone.TOP, text, durationMs); }
     public void showContextOverlay(Zone zone, String text, long durationMs) {
@@ -79,6 +82,10 @@ public final class AmbilightView extends View {
         drawCornerGlow(canvas,tv,tv.right,tv.top,mix(state.top[state.top.length-1],state.right[0]));
         drawCornerGlow(canvas,tv,tv.left,tv.bottom,mix(state.bottom[0],state.left[state.left.length-1]));
         drawCornerGlow(canvas,tv,tv.right,tv.bottom,mix(state.bottom[state.bottom.length-1],state.right[state.right.length-1]));
+
+        // Always force the physical edge of the projector image to black, regardless of corner glow.
+        drawOuterBlackVignette(canvas);
+
         paint.setShader(null); paint.setColor(Color.BLACK); canvas.drawRect(tv,paint);
         drawContextZones(canvas,tv);
         if(debug) drawDebug(canvas,tv);
@@ -102,7 +109,7 @@ public final class AmbilightView extends View {
         paint.setShader(new LinearGradient(0,tv.top,0,tv.bottom,right,positions(right.length),Shader.TileMode.CLAMP));
         c.drawRect(tv.right-1,tv.top,getWidth(),tv.bottom,paint);
 
-        // Fade each continuous edge outward to black with a translucent black overlay.
+        // Base falloff away from the TV.
         paint.setShader(new LinearGradient(0,0,0,tv.top,Color.BLACK,0x00000000,Shader.TileMode.CLAMP)); c.drawRect(tv.left,0,tv.right,tv.top,paint);
         paint.setShader(new LinearGradient(0,tv.bottom,0,getHeight(),0x00000000,Color.BLACK,Shader.TileMode.CLAMP)); c.drawRect(tv.left,tv.bottom,tv.right,getHeight(),paint);
         paint.setShader(new LinearGradient(0,0,tv.left,0,Color.BLACK,0x00000000,Shader.TileMode.CLAMP)); c.drawRect(0,tv.top,tv.left,tv.bottom,paint);
@@ -119,6 +126,20 @@ public final class AmbilightView extends View {
         c.drawRect(l,t,r,b,paint);
     }
 
+    private void drawOuterBlackVignette(Canvas c) {
+        float fw = Math.max(2f, getWidth() * outerFadeRatio);
+        float fh = Math.max(2f, getHeight() * outerFadeRatio);
+
+        paint.setShader(new LinearGradient(0,0,fw,0,Color.BLACK,0x00000000,Shader.TileMode.CLAMP));
+        c.drawRect(0,0,fw,getHeight(),paint);
+        paint.setShader(new LinearGradient(getWidth()-fw,0,getWidth(),0,0x00000000,Color.BLACK,Shader.TileMode.CLAMP));
+        c.drawRect(getWidth()-fw,0,getWidth(),getHeight(),paint);
+        paint.setShader(new LinearGradient(0,0,0,fh,Color.BLACK,0x00000000,Shader.TileMode.CLAMP));
+        c.drawRect(0,0,getWidth(),fh,paint);
+        paint.setShader(new LinearGradient(0,getHeight()-fh,0,getHeight(),0x00000000,Color.BLACK,Shader.TileMode.CLAMP));
+        c.drawRect(0,getHeight()-fh,getWidth(),getHeight(),paint);
+    }
+
     private int[] withCornerMix(int[] src,int first,int last){int[] out=src.clone();if(out.length>0){out[0]=mix(out[0],first);out[out.length-1]=mix(out[out.length-1],last);}return out;}
     private float[] positions(int n){float[] p=new float[n];if(n==1){p[0]=0f;return p;}for(int i=0;i<n;i++)p[i]=i/(float)(n-1);return p;}
     private int mix(int a,int b){int r=(((a>>16)&255)+((b>>16)&255))/2,g=(((a>>8)&255)+((b>>8)&255))/2,bl=((a&255)+(b&255))/2;return 0xFF000000|(r<<16)|(g<<8)|bl;}
@@ -130,6 +151,7 @@ public final class AmbilightView extends View {
     private boolean alive(Overlay o,long now){if(o.text==null||now>o.until){o.text=null;return false;}return true;}
     private boolean isAnyOverlayAlive(long now){return alive(topOverlay,now)||alive(bottomOverlay,now)||alive(leftOverlay,now)||alive(rightOverlay,now);}
 
-    private void drawDebug(Canvas canvas,RectF tv){paint.setShader(null);paint.setStyle(Paint.Style.STROKE);paint.setStrokeWidth(2f);paint.setColor(0x88FFFFFF);canvas.drawRect(tv,paint);paint.setStyle(Paint.Style.FILL);textPaint.setTextAlign(Paint.Align.LEFT);textPaint.setTextSize(Math.max(15f,getHeight()*0.022f));textPaint.setColor(Color.WHITE);float x=18f,y=28f,line=textPaint.getTextSize()*1.35f;canvas.drawText("Ambi Projector v0.3",x,y,textPaint);y+=line;canvas.drawText(String.format("Camera: %dx%d   %.1f fps",state.sourceWidth,state.sourceHeight,state.fps),x,y,textPaint);y+=line;canvas.drawText("Tap: preview  |  Long: calibrate  |  Double: 4 text zones",x,y,textPaint);}
+    private void drawDebug(Canvas canvas,RectF tv){paint.setShader(null);paint.setStyle(Paint.Style.STROKE);paint.setStrokeWidth(2f);paint.setColor(0x88FFFFFF);canvas.drawRect(tv,paint);paint.setStyle(Paint.Style.FILL);textPaint.setTextAlign(Paint.Align.LEFT);textPaint.setTextSize(Math.max(15f,getHeight()*0.022f));textPaint.setColor(Color.WHITE);float x=18f,y=28f,line=textPaint.getTextSize()*1.35f;canvas.drawText("Ambi Projector v0.4",x,y,textPaint);y+=line;canvas.drawText(String.format("Camera: %dx%d   %.1f fps",state.sourceWidth,state.sourceHeight,state.fps),x,y,textPaint);y+=line;canvas.drawText("Tap: settings  |  Long: calibrate  |  Double: 4 text zones",x,y,textPaint);}
     @Override public boolean onTouchEvent(MotionEvent event){return gestures.onTouchEvent(event)||super.onTouchEvent(event);}
+    private static float clamp(float v,float lo,float hi){return Math.max(lo,Math.min(hi,v));}
 }
