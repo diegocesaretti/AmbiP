@@ -7,12 +7,17 @@ import androidx.camera.core.ImageProxy;
 import java.nio.ByteBuffer;
 import java.util.concurrent.atomic.AtomicReference;
 
-/** CPU-light proof-of-concept analyzer. */
+/** CPU-light analyzer with manual quadrilateral calibration and a simple auto detector. */
 public final class FrameAnalyzer implements ImageAnalysis.Analyzer {
     public interface Listener { void onAmbilightFrame(AmbilightState state); }
+    public interface DetectionListener { void onDetected(float[] corners, float confidence); }
 
     private final Listener listener;
-    private final AtomicReference<Float> cropScale = new AtomicReference<>(0.80f);
+    private volatile DetectionListener detectionListener;
+    private final AtomicReference<float[]> corners = new AtomicReference<>(new float[]{
+            0.15f, 0.20f,  0.85f, 0.20f,  0.85f, 0.80f,  0.15f, 0.80f
+    });
+    private volatile boolean autoDetectRequested = false;
     private volatile float smoothing = 0.72f;
     private volatile float brightness = 1.0f;
 
@@ -27,8 +32,17 @@ public final class FrameAnalyzer implements ImageAnalysis.Analyzer {
     private float fps = 0f;
 
     public FrameAnalyzer(Listener listener) { this.listener = listener; }
-    public void setCropScale(float value) { cropScale.set(clamp(value, 0.45f, 0.98f)); }
-    public float getCropScale() { return cropScale.get(); }
+    public void setDetectionListener(DetectionListener listener) { this.detectionListener = listener; }
+
+    public void setCorners(float[] normalizedCorners) {
+        if (normalizedCorners == null || normalizedCorners.length != 8) return;
+        float[] c = normalizedCorners.clone();
+        for (int i = 0; i < c.length; i++) c[i] = clamp(c[i], 0.01f, 0.99f);
+        corners.set(c);
+    }
+
+    public float[] getCorners() { return corners.get().clone(); }
+    public void requestAutoDetect() { autoDetectRequested = true; }
     public void setSmoothing(float value) { smoothing = clamp(value, 0f, 0.95f); }
     public float getSmoothing() { return smoothing; }
     public void setBrightness(float value) { brightness = clamp(value, 0.25f, 2.0f); }
@@ -46,17 +60,25 @@ public final class FrameAnalyzer implements ImageAnalysis.Analyzer {
             final int pixelStride = plane.getPixelStride();
             if (pixelStride < 4 || width <= 0 || height <= 0) return;
 
-            RectI crop = centeredTvCrop(width, height, cropScale.get());
-            int strip = Math.max(3, Math.min(crop.w, crop.h) / 28);
+            if (autoDetectRequested) {
+                autoDetectRequested = false;
+                DetectionResult result = detectScreen(buffer, rowStride, pixelStride, width, height);
+                if (result != null) {
+                    corners.set(result.corners);
+                    DetectionListener dl = detectionListener;
+                    if (dl != null) dl.onDetected(result.corners.clone(), result.confidence);
+                }
+            }
 
-            int[] top = sampleHorizontal(buffer, rowStride, pixelStride, crop.x, crop.y,
-                    crop.w, strip, AmbilightState.H_SEGMENTS);
-            int[] bottom = sampleHorizontal(buffer, rowStride, pixelStride, crop.x,
-                    crop.y + crop.h - strip, crop.w, strip, AmbilightState.H_SEGMENTS);
-            int[] left = sampleVertical(buffer, rowStride, pixelStride, crop.x, crop.y,
-                    strip, crop.h, AmbilightState.V_SEGMENTS);
-            int[] right = sampleVertical(buffer, rowStride, pixelStride,
-                    crop.x + crop.w - strip, crop.y, strip, crop.h, AmbilightState.V_SEGMENTS);
+            float[] c = corners.get();
+            int[] top = sampleEdge(buffer, rowStride, pixelStride, width, height,
+                    c[0], c[1], c[2], c[3], AmbilightState.H_SEGMENTS);
+            int[] right = sampleEdge(buffer, rowStride, pixelStride, width, height,
+                    c[2], c[3], c[4], c[5], AmbilightState.V_SEGMENTS);
+            int[] bottom = sampleEdge(buffer, rowStride, pixelStride, width, height,
+                    c[6], c[7], c[4], c[5], AmbilightState.H_SEGMENTS);
+            int[] left = sampleEdge(buffer, rowStride, pixelStride, width, height,
+                    c[0], c[1], c[6], c[7], AmbilightState.V_SEGMENTS);
 
             updateFps();
             applySmoothing(top, smoothTop);
@@ -66,57 +88,123 @@ public final class FrameAnalyzer implements ImageAnalysis.Analyzer {
             smoothingPrimed = true;
 
             listener.onAmbilightFrame(new AmbilightState(top, bottom, left, right,
-                    fps, width, height, cropScale.get()));
+                    fps, width, height, estimateWidth(c)));
         } finally {
             image.close();
         }
     }
 
-    private int[] sampleHorizontal(ByteBuffer buffer, int rowStride, int pixelStride,
-                                   int x, int y, int w, int h, int segments) {
+    private int[] sampleEdge(ByteBuffer buffer, int rowStride, int pixelStride,
+                             int frameW, int frameH, float x0, float y0, float x1, float y1,
+                             int segments) {
         int[] out = new int[segments];
-        for (int s = 0; s < segments; s++) {
-            int x0 = x + (s * w) / segments;
-            int x1 = x + ((s + 1) * w) / segments;
-            out[s] = averageRegion(buffer, rowStride, pixelStride, x0, y,
-                    Math.max(1, x1 - x0), h);
-        }
-        return out;
-    }
+        float dx = x1 - x0;
+        float dy = y1 - y0;
+        float nx = -dy;
+        float ny = dx;
+        float nLen = (float) Math.sqrt(nx * nx + ny * ny);
+        if (nLen > 0.0001f) { nx /= nLen; ny /= nLen; }
+        float inset = 0.012f;
+        nx *= inset; ny *= inset;
 
-    private int[] sampleVertical(ByteBuffer buffer, int rowStride, int pixelStride,
-                                 int x, int y, int w, int h, int segments) {
-        int[] out = new int[segments];
         for (int s = 0; s < segments; s++) {
-            int y0 = y + (s * h) / segments;
-            int y1 = y + ((s + 1) * h) / segments;
-            out[s] = averageRegion(buffer, rowStride, pixelStride, x, y0,
-                    w, Math.max(1, y1 - y0));
-        }
-        return out;
-    }
-
-    private int averageRegion(ByteBuffer buffer, int rowStride, int pixelStride,
-                              int x, int y, int w, int h) {
-        long r = 0, g = 0, b = 0;
-        int count = 0;
-        int stepX = Math.max(1, w / 8);
-        int stepY = Math.max(1, h / 5);
-        for (int yy = y; yy < y + h; yy += stepY) {
-            for (int xx = x; xx < x + w; xx += stepX) {
-                int p = yy * rowStride + xx * pixelStride;
+            long r = 0, g = 0, b = 0;
+            int count = 0;
+            float a0 = s / (float) segments;
+            float a1 = (s + 1) / (float) segments;
+            for (int k = 1; k <= 5; k++) {
+                float a = a0 + (a1 - a0) * (k / 6f);
+                float fx = x0 + dx * a + nx;
+                float fy = y0 + dy * a + ny;
+                int px = clampInt(Math.round(fx * (frameW - 1)), 0, frameW - 1);
+                int py = clampInt(Math.round(fy * (frameH - 1)), 0, frameH - 1);
+                int p = py * rowStride + px * pixelStride;
                 if (p < 0 || p + 3 >= buffer.limit()) continue;
+                // CameraX RGBA_8888 plane is A,R,G,B in the plane buffer on tested devices.
                 int rr = buffer.get(p + 1) & 0xFF;
                 int gg = buffer.get(p + 2) & 0xFF;
                 int bb = buffer.get(p + 3) & 0xFF;
                 r += rr; g += gg; b += bb; count++;
             }
+            if (count == 0) out[s] = 0xFF000000;
+            else out[s] = 0xFF000000
+                    | (tone((int)(r / count)) << 16)
+                    | (tone((int)(g / count)) << 8)
+                    | tone((int)(b / count));
         }
-        if (count == 0) return 0xFF000000;
-        int rr = tone((int) (r / count));
-        int gg = tone((int) (g / count));
-        int bb = tone((int) (b / count));
-        return 0xFF000000 | (rr << 16) | (gg << 8) | bb;
+        return out;
+    }
+
+    /**
+     * Lightweight rectangle detector: searches strong vertical/horizontal luminance transitions
+     * around the central 80% of the frame. It is intentionally conservative and returns a
+     * confidence value so manual calibration remains the reliable fallback.
+     */
+    private DetectionResult detectScreen(ByteBuffer buffer, int rowStride, int pixelStride,
+                                         int w, int h) {
+        int step = Math.max(2, Math.min(w, h) / 180);
+        int xStart = (int)(w * 0.06f), xEnd = (int)(w * 0.94f);
+        int yStart = (int)(h * 0.06f), yEnd = (int)(h * 0.94f);
+
+        float[] vScore = new float[w];
+        float[] hScore = new float[h];
+
+        for (int x = xStart + 2; x < xEnd - 2; x += step) {
+            long sum = 0; int n = 0;
+            for (int y = yStart; y < yEnd; y += step) {
+                int a = luminance(buffer, rowStride, pixelStride, w, h, x - 2, y);
+                int b = luminance(buffer, rowStride, pixelStride, w, h, x + 2, y);
+                sum += Math.abs(a - b); n++;
+            }
+            vScore[x] = n == 0 ? 0 : (float)sum / n;
+        }
+
+        for (int y = yStart + 2; y < yEnd - 2; y += step) {
+            long sum = 0; int n = 0;
+            for (int x = xStart; x < xEnd; x += step) {
+                int a = luminance(buffer, rowStride, pixelStride, w, h, x, y - 2);
+                int b = luminance(buffer, rowStride, pixelStride, w, h, x, y + 2);
+                sum += Math.abs(a - b); n++;
+            }
+            hScore[y] = n == 0 ? 0 : (float)sum / n;
+        }
+
+        int left = bestPeak(vScore, xStart, (int)(w * 0.48f), step);
+        int right = bestPeak(vScore, (int)(w * 0.52f), xEnd, step);
+        int top = bestPeak(hScore, yStart, (int)(h * 0.48f), step);
+        int bottom = bestPeak(hScore, (int)(h * 0.52f), yEnd, step);
+        if (left < 0 || right < 0 || top < 0 || bottom < 0) return null;
+
+        float rw = right - left, rh = bottom - top;
+        if (rw < w * 0.25f || rh < h * 0.20f) return null;
+        float ratio = rw / rh;
+        float ratioScore = 1f - Math.min(1f, Math.abs(ratio - 16f/9f) / 1.2f);
+        float edgeScore = (vScore[left] + vScore[right] + hScore[top] + hScore[bottom]) / (4f * 45f);
+        float confidence = clamp(0.35f * ratioScore + 0.65f * Math.min(1f, edgeScore), 0f, 1f);
+
+        float[] c = new float[]{
+                left/(float)w, top/(float)h,
+                right/(float)w, top/(float)h,
+                right/(float)w, bottom/(float)h,
+                left/(float)w, bottom/(float)h
+        };
+        return new DetectionResult(c, confidence);
+    }
+
+    private int bestPeak(float[] scores, int from, int to, int step) {
+        float best = 7f; int idx = -1;
+        for (int i = Math.max(0, from); i < Math.min(scores.length, to); i += step) {
+            if (scores[i] > best) { best = scores[i]; idx = i; }
+        }
+        return idx;
+    }
+
+    private int luminance(ByteBuffer b, int rowStride, int pixelStride, int w, int h, int x, int y) {
+        x = clampInt(x, 0, w - 1); y = clampInt(y, 0, h - 1);
+        int p = y * rowStride + x * pixelStride;
+        if (p < 0 || p + 3 >= b.limit()) return 0;
+        int r = b.get(p + 1) & 0xFF, g = b.get(p + 2) & 0xFF, bl = b.get(p + 3) & 0xFF;
+        return (r * 54 + g * 183 + bl * 19) >> 8;
     }
 
     private int tone(int value) { return clampInt(Math.round(value * brightness), 0, 255); }
@@ -142,16 +230,14 @@ public final class FrameAnalyzer implements ImageAnalysis.Analyzer {
         }
     }
 
-    private RectI centeredTvCrop(int frameW, int frameH, float scale) {
-        int w = Math.round(frameW * scale);
-        int h = Math.round(w * 9f / 16f);
-        if (h > frameH * scale) {
-            h = Math.round(frameH * scale);
-            w = Math.round(h * 16f / 9f);
-        }
-        w = Math.min(w, frameW);
-        h = Math.min(h, frameH);
-        return new RectI((frameW - w) / 2, (frameH - h) / 2, w, h);
+    private float estimateWidth(float[] c) {
+        float top = dist(c[0], c[1], c[2], c[3]);
+        float bottom = dist(c[6], c[7], c[4], c[5]);
+        return clamp((top + bottom) * 0.5f, 0f, 1f);
+    }
+
+    private float dist(float x0,float y0,float x1,float y1) {
+        float dx=x1-x0, dy=y1-y0; return (float)Math.sqrt(dx*dx+dy*dy);
     }
 
     private void updateFps() {
@@ -168,8 +254,8 @@ public final class FrameAnalyzer implements ImageAnalysis.Analyzer {
     private static float clamp(float v, float lo, float hi) { return Math.max(lo, Math.min(hi, v)); }
     private static int clampInt(int v, int lo, int hi) { return Math.max(lo, Math.min(hi, v)); }
 
-    private static final class RectI {
-        final int x, y, w, h;
-        RectI(int x, int y, int w, int h) { this.x = x; this.y = y; this.w = w; this.h = h; }
+    private static final class DetectionResult {
+        final float[] corners; final float confidence;
+        DetectionResult(float[] corners, float confidence) { this.corners = corners; this.confidence = confidence; }
     }
 }
