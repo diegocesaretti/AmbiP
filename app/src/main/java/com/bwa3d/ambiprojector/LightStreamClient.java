@@ -35,8 +35,8 @@ public final class LightStreamClient {
     private final Listener listener;
     private volatile boolean running;
     private volatile Socket socket;
-    /** Maximum smoothing used only for small/noisy changes. Large changes bypass it. */
-    private volatile float smoothing = 0.25f;
+    /** Smoothing is only a ceiling for tiny/noisy changes. Motion rapidly bypasses it. */
+    private volatile float smoothing = 0.12f;
     private volatile int generation;
     private String host;
     private int port;
@@ -70,11 +70,11 @@ public final class LightStreamClient {
                 Socket s = new Socket();
                 socket = s;
                 s.setTcpNoDelay(true);
-                s.setReceiveBufferSize(16 * 1024);
+                s.setReceiveBufferSize(4 * 1024);
                 s.connect(new InetSocketAddress(host, port), 2200);
                 s.setSoTimeout(0);
-                BufferedInputStream in = new BufferedInputStream(s.getInputStream(), 8192);
-                BufferedOutputStream out = new BufferedOutputStream(s.getOutputStream(), 2048);
+                BufferedInputStream in = new BufferedInputStream(s.getInputStream(), 2048);
+                BufferedOutputStream out = new BufferedOutputStream(s.getOutputStream(), 1024);
                 websocketHandshake(in, out);
                 if (g != generation) break;
                 notifyStatus("LIVE · " + host + ":" + port, true);
@@ -139,8 +139,8 @@ public final class LightStreamClient {
         ByteBuffer b = ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN);
         b.position(4);
         int version = b.get() & 255;
-        b.get(); // flags/reserved
-        b.getInt(); // sequence
+        b.get();
+        b.getInt();
         float fps = (b.getShort() & 0xffff) / 100f;
         int width = b.getShort() & 0xffff;
         int height = b.getShort() & 0xffff;
@@ -213,8 +213,8 @@ public final class LightStreamClient {
     }
 
     /**
-     * Noise-aware smoothing. Tiny changes can use the configured smoothing, while medium/large
-     * changes progressively bypass the old value. This avoids the classic EMA one-frame lag.
+     * Noise-gated smoothing: one-level RGB shimmer is held, but real motion releases smoothing
+     * within a small delta range instead of carrying an EMA tail into the next source frame.
      */
     private static int[] adaptiveSmooth(int[] current,int[] previous,float maxAmount){
         if(previous==null||previous.length!=current.length||maxAmount<=0f)return current.clone();
@@ -224,12 +224,12 @@ public final class LightStreamClient {
             int dr=Math.abs(((a>>16)&255)-((b>>16)&255));
             int dg=Math.abs(((a>>8)&255)-((b>>8)&255));
             int db=Math.abs((a&255)-(b&255));
+            if(dr<=1&&dg<=1&&db<=1){out[i]=a;continue;}
             float delta=(dr+dg+db)/(3f*255f);
-            float motion=clamp01((delta-0.012f)/0.18f);
-            // Accelerate the release of smoothing as soon as real motion appears.
-            motion=(float)Math.sqrt(motion);
-            float old=maxAmount*(1f-motion);
-            if(delta>0.28f) old=0f;
+            float motion=clamp01((delta-0.006f)/0.075f);
+            float remaining=1f-motion;
+            float old=maxAmount*remaining*remaining;
+            if(delta>0.10f)old=0f;
             float fresh=1f-old;
             int r=Math.round(((a>>16)&255)*old+((b>>16)&255)*fresh);
             int g=Math.round(((a>>8)&255)*old+((b>>8)&255)*fresh);
