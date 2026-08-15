@@ -162,7 +162,16 @@ public final class MainActivity extends ComponentActivity {
         addFloatSlider("Cloud saturation",0.50f,2.50f,1.32f,"cloudSaturation",v->ambilightView.setCloudSaturation(v));
         addFloatSlider("Cloud brightness",0.40f,1.80f,1.08f,"cloudBrightness",v->ambilightView.setCloudBrightness(v));
 
-        TextView info=text("COLOR CLOUD: radial gradient fields + diagonal corner bridges. LAYOUT: projected TV/text. OUTER: keystone and projection edges.",12,0xFFAAAAAA);info.setPadding(0,dp(8),0,0);settingsPanel.addView(info);
+        addSection("COLOR CLOUD DYNAMICS");
+        addFloatSlider("Dynamic amount",0.00f,1.50f,0.85f,"cloudDynamicAmount",v->ambilightView.setCloudDynamicAmount(v));
+        addFloatSlider("Dynamic radius",0.00f,1.50f,0.65f,"cloudDynamicRadius",v->ambilightView.setCloudDynamicRadius(v));
+        addFloatSlider("Dynamic stretch",0.00f,2.00f,0.85f,"cloudDynamicStretch",v->ambilightView.setCloudDynamicStretch(v));
+        addFloatSlider("Dynamic opacity",0.00f,0.80f,0.18f,"cloudDynamicOpacity",v->ambilightView.setCloudDynamicOpacity(v));
+        addFloatSlider("Energy curve",0.40f,2.50f,1.15f,"cloudEnergyGamma",v->ambilightView.setCloudEnergyGamma(v));
+        addFloatSlider("Saturation weight",0.00f,1.00f,0.60f,"cloudSaturationWeight",v->ambilightView.setCloudSaturationWeight(v));
+        addFloatSlider("Brightness weight",0.00f,1.00f,0.40f,"cloudLumaWeight",v->ambilightView.setCloudLumaWeight(v));
+
+        TextView info=text("DYNAMICS: bright/saturated regions become larger, longer and slightly stronger; dim/desaturated regions contract. COLOR CLOUD keeps diagonal corner bridges.",12,0xFFAAAAAA);info.setPadding(0,dp(8),0,0);settingsPanel.addView(info);
         TextView reset=makeButton("RESET ALL SETTINGS",v->resetSettings());LinearLayout.LayoutParams rp=new LinearLayout.LayoutParams(-1,-2);rp.topMargin=dp(12);reset.setLayoutParams(rp);settingsPanel.addView(reset);
         FrameLayout.LayoutParams sp=new FrameLayout.LayoutParams(Math.min(dp(560),Math.round(getResources().getDisplayMetrics().widthPixels*0.62f)),-1);sp.gravity=Gravity.END;scroll.setVisibility(View.GONE);root.addView(scroll,sp);
     }
@@ -179,12 +188,14 @@ public final class MainActivity extends ComponentActivity {
         if(analyzer==null)return;analyzer.setCaptureContrast(prefs.getFloat("captureContrast",1f));analyzer.setCaptureSaturation(prefs.getFloat("captureSaturation",1f));analyzer.setCaptureColorTemperature(prefs.getFloat("captureColorTemperature",0f));analyzer.setCaptureTint(prefs.getFloat("captureTint",0f));analyzer.setCaptureRedGain(prefs.getFloat("captureRedGain",1f));analyzer.setCaptureGreenGain(prefs.getFloat("captureGreenGain",1f));analyzer.setCaptureBlueGain(prefs.getFloat("captureBlueGain",1f));analyzer.setAmbientBrightness(prefs.getFloat("ambientBrightness",1f));analyzer.setAmbientContrast(prefs.getFloat("ambientContrast",1f));analyzer.setAmbientColorTemperature(prefs.getFloat("ambientColorTemperature",0f));analyzer.setSmoothing(prefs.getFloat("smoothing",0.68f));
         String style=prefs.getString("projectionStyle","COLOR_CLOUD");ambilightView.setProjectionStyle("EDGE_GRADIENT".equals(style)?AmbilightView.ProjectionStyle.EDGE_GRADIENT:AmbilightView.ProjectionStyle.COLOR_CLOUD);
         ambilightView.setCloudSpread(prefs.getFloat("cloudSpread",0.42f));ambilightView.setCloudRadius(prefs.getFloat("cloudRadius",0.26f));ambilightView.setCloudOpacity(prefs.getFloat("cloudOpacity",0.60f));ambilightView.setCloudSoftness(prefs.getFloat("cloudSoftness",0.72f));ambilightView.setCornerBlend(prefs.getFloat("cornerBlend",0.82f));ambilightView.setCornerRadius(prefs.getFloat("cornerRadius",1.48f));ambilightView.setCloudEdgePull(prefs.getFloat("cloudEdgePull",0.62f));ambilightView.setCloudSaturation(prefs.getFloat("cloudSaturation",1.32f));ambilightView.setCloudBrightness(prefs.getFloat("cloudBrightness",1.08f));
+        ambilightView.setCloudDynamicAmount(prefs.getFloat("cloudDynamicAmount",0.85f));ambilightView.setCloudDynamicRadius(prefs.getFloat("cloudDynamicRadius",0.65f));ambilightView.setCloudDynamicStretch(prefs.getFloat("cloudDynamicStretch",0.85f));ambilightView.setCloudDynamicOpacity(prefs.getFloat("cloudDynamicOpacity",0.18f));ambilightView.setCloudEnergyGamma(prefs.getFloat("cloudEnergyGamma",1.15f));ambilightView.setCloudSaturationWeight(prefs.getFloat("cloudSaturationWeight",0.60f));ambilightView.setCloudLumaWeight(prefs.getFloat("cloudLumaWeight",0.40f));
         ambilightView.setOuterFadeRatio(prefs.getFloat("outerFade",0.16f));ambilightView.setKeystoneCorners(loadKeystone());ambilightView.setTvRect(loadTvRect());ambilightView.setTextFrames(loadTextFrames());calibrationZoom=prefs.getFloat("cameraZoom",1.8f);requestedExposureIndex=prefs.getInt("exposureIndex",0);
     }
 
     private void resetSettings(){
         prefs.edit().clear().apply();analyzer.setCaptureContrast(1f);analyzer.setCaptureSaturation(1f);analyzer.setCaptureColorTemperature(0f);analyzer.setCaptureTint(0f);analyzer.setCaptureRedGain(1f);analyzer.setCaptureGreenGain(1f);analyzer.setCaptureBlueGain(1f);analyzer.setAmbientBrightness(1f);analyzer.setAmbientContrast(1f);analyzer.setAmbientColorTemperature(0f);analyzer.setSmoothing(0.68f);ambilightView.setOuterFadeRatio(0.16f);
         ambilightView.setProjectionStyle(AmbilightView.ProjectionStyle.COLOR_CLOUD);ambilightView.setCloudSpread(0.42f);ambilightView.setCloudRadius(0.26f);ambilightView.setCloudOpacity(0.60f);ambilightView.setCloudSoftness(0.72f);ambilightView.setCornerBlend(0.82f);ambilightView.setCornerRadius(1.48f);ambilightView.setCloudEdgePull(0.62f);ambilightView.setCloudSaturation(1.32f);ambilightView.setCloudBrightness(1.08f);
+        ambilightView.setCloudDynamicAmount(0.85f);ambilightView.setCloudDynamicRadius(0.65f);ambilightView.setCloudDynamicStretch(0.85f);ambilightView.setCloudDynamicOpacity(0.18f);ambilightView.setCloudEnergyGamma(1.15f);ambilightView.setCloudSaturationWeight(0.60f);ambilightView.setCloudLumaWeight(0.40f);
         float[] k=defaultKeystone(),tv=defaultTvRect();float[][] frames=defaultTextFrames();ambilightView.setKeystoneCorners(k);ambilightView.setTvRect(tv);ambilightView.setTextFrames(frames);projectorKeystoneView.setCorners(k);projectionLayoutView.setTvRect(tv);projectionLayoutView.setTextFrames(frames);calibrationZoom=1.8f;requestedExposureIndex=0;applyZoom(calibrationZoom);applyExposureIndex(0,false);Toast.makeText(this,"Settings reset · reopen panel to refresh sliders",Toast.LENGTH_SHORT).show();
     }
 
