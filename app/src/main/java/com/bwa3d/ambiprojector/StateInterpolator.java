@@ -8,8 +8,8 @@ import android.view.Choreographer;
  *
  * It never buffers a future source frame. Every packet immediately becomes the new target and the
  * current visible state becomes the new start state. Rendering is scheduled by Choreographer so
- * updates land on the next physical display frame instead of a Handler timer. Large scene changes
- * intentionally get a very short catch-up time.
+ * updates land on the next physical display frame. Large scene changes intentionally get almost
+ * immediate response, while small changes retain a short soft transition.
  */
 public final class StateInterpolator implements Choreographer.FrameCallback {
     public interface Listener { void onInterpolated(AmbilightState state); }
@@ -25,8 +25,8 @@ public final class StateInterpolator implements Choreographer.FrameCallback {
     private long lastRenderNs;
     private boolean running;
     private boolean enabled = true;
-    private int durationMs = 46;
-    private float adaptive = 0.88f;
+    private int durationMs = 30;
+    private float adaptive = 0.94f;
     private int renderHz = 60;
 
     public StateInterpolator(Listener listener) {
@@ -56,12 +56,10 @@ public final class StateInterpolator implements Choreographer.FrameCallback {
         long now = SystemClock.uptimeMillis();
         if (lastTargetAt > 0) {
             long measured = clamp(now - lastTargetAt, 16L, 500L);
-            // Follow changing source FPS quickly without reacting to one odd frame.
             sourceIntervalMs = Math.round(sourceIntervalMs * 0.55f + measured * 0.45f);
         }
         lastTargetAt = now;
 
-        // Never queue. Start from exactly what should be visible at this instant.
         displayed = current(now);
         start = displayed;
         target = next;
@@ -89,21 +87,21 @@ public final class StateInterpolator implements Choreographer.FrameCallback {
     private AmbilightState current(long now) {
         if (!enabled || target == null || start == null || durationMs <= 0) return target;
 
-        // Never spend most of a source-frame chasing an already old target.
-        int sourceBound = Math.max(14, Math.round(sourceIntervalMs * 0.52f));
+        // A target should never spend a meaningful fraction of the next source interval catching up.
+        int sourceBound = Math.max(12, Math.round(sourceIntervalMs * 0.42f));
         int base = Math.min(durationMs, sourceBound);
         float change = difference(start, target);
 
-        // Large changes get close to one-display-frame response. Small changes retain fluidity.
-        float urgency = clamp((change - 0.055f) / 0.46f, 0f, 1f);
-        float fastFactor = 1f - adaptive * 0.78f * urgency;
-        int effective = Math.max(10, Math.round(base * fastFactor));
+        float urgency = clamp((change - 0.035f) / 0.34f, 0f, 1f);
+        float fastFactor = 1f - adaptive * 0.86f * urgency;
+        int effective = Math.max(7, Math.round(base * fastFactor));
         float t = clamp((now - startAt) / (float)effective, 0f, 1f);
         if (t >= 1f) return target;
 
-        // Fast-start ease-out: unlike smoothstep it does not have a zero slope at t=0.
+        // Cubic ease-out has a strong initial slope: most of the visible move happens on the first
+        // display frame rather than waiting through a traditional smoothstep ramp.
         float u = 1f - t;
-        float eased = 1f - u * u;
+        float eased = 1f - u * u * u;
         return blend(start, target, eased);
     }
 
