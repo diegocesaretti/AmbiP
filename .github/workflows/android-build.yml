@@ -2,7 +2,7 @@ name: Android Debug APK
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, feature/v021-free-tv-text-api-capture-api ]
   workflow_dispatch:
 
 jobs:
@@ -36,13 +36,13 @@ jobs:
       - name: Upload projector APK
         uses: actions/upload-artifact@v4
         with:
-          name: AmbiProjector-v0.20-fast-color-cloud
+          name: AmbiProjector-v0.21-free-tv-text-api
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
 
       - name: Upload Android TV source APK
         uses: actions/upload-artifact@v4
         with:
-          name: AmbiP-TV-Source-v0.5-binary-low-latency
+          name: AmbiP-TV-Source-v0.6-capture-api
           path: tvsource/build/outputs/apk/debug/tvsource-debug.apk
           if-no-files-found: error
