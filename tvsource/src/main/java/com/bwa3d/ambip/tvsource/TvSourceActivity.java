@@ -62,7 +62,7 @@ public final class TvSourceActivity extends ComponentActivity {
         root.setPadding(dp(48), dp(32), dp(48), dp(34));
         scroll.addView(root, new ScrollView.LayoutParams(-1, -2));
 
-        TextView title = text("AmbiP TV Source · v0.5", 30, Color.WHITE);
+        TextView title = text("AmbiP TV Source · v0.6", 30, Color.WHITE);
         root.addView(title);
         TextView desc = text("Ultra-lean 128×72 capture source with compact binary light transport. Smoothing, interpolation, Color Cloud and calibration run on the projector.", 17, 0xffb9c2ce);
         desc.setGravity(Gravity.CENTER);
@@ -90,7 +90,7 @@ public final class TvSourceActivity extends ComponentActivity {
         TextView focusHelp = text("Use the D-pad. The selected control turns bright cyan with a white border.", 15, 0xff81d4fa);
         focusHelp.setGravity(Gravity.CENTER); focusHelp.setPadding(0,dp(16),0,dp(8)); root.addView(focusHelp);
 
-        TextView steps = text("START CAPTURE → approve Android screen sharing → HOME → open Stremio/player.\n\nFPS − / + gives quick TV-side latency tuning. For every other setting, use the single AmbiP Control Center on the projector at port 8081.", 16, 0xffc9d0da);
+        TextView steps = text("START CAPTURE → approve Android screen sharing → HOME → open Stremio/player.\n\nFPS − / + gives quick TV-side latency tuning. Capture APIs and every other setting are available from the AmbiP Control Center on projector port 8081.", 16, 0xffc9d0da);
         steps.setPadding(0, dp(18), 0, 0); root.addView(steps, new LinearLayout.LayoutParams(-1, -2));
 
         setContentView(scroll);
@@ -99,13 +99,13 @@ public final class TvSourceActivity extends ComponentActivity {
 
     private void adjustFps(int delta) {
         int next = Math.max(4, Math.min(30, SourceHub.targetFps + delta));
-        SourceHub.applySettings(this, next, null, null, null);
+        SourceHub.applySettings(this, next, null, null, null, null, null);
         stats.setText(String.format(Locale.US, "%.1f fps · %d×%d analysis · %d client(s) · TARGET %d FPS",
                 SourceHub.getFps(), SourceHub.getWidth(), SourceHub.getHeight(), SourceHub.getClients(), SourceHub.targetFps));
     }
 
     private void toggleAutoBoot() {
-        SourceHub.applySettings(this,null,null,null,!SourceHub.autoStartOnBoot);
+        SourceHub.applySettings(this,null,null,null,!SourceHub.autoStartOnBoot,null,null);
         if(autoButton!=null) autoButton.setText(SourceHub.autoStartOnBoot ? "AUTO BOOT: ON" : "AUTO BOOT: OFF");
     }
 
