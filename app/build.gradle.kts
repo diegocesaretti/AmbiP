@@ -10,8 +10,8 @@ android {
         applicationId = "com.bwa3d.ambiprojector"
         minSdk = 23
         targetSdk = 36
-        versionCode = 7
-        versionName = "0.7.0"
+        versionCode = 8
+        versionName = "0.8.0"
     }
 
     buildTypes {
