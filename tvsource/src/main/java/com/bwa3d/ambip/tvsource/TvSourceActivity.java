@@ -49,16 +49,8 @@ public final class TvSourceActivity extends ComponentActivity {
         }
     }
 
-    @Override protected void onStart() {
-        super.onStart();
-        handler.removeCallbacks(refresh);
-        handler.post(refresh);
-    }
-
-    @Override protected void onStop() {
-        handler.removeCallbacks(refresh);
-        super.onStop();
-    }
+    @Override protected void onStart() { super.onStart(); handler.removeCallbacks(refresh); handler.post(refresh); }
+    @Override protected void onStop() { handler.removeCallbacks(refresh); super.onStop(); }
 
     private void buildUi() {
         ScrollView scroll = new ScrollView(this);
@@ -70,9 +62,9 @@ public final class TvSourceActivity extends ComponentActivity {
         root.setPadding(dp(48), dp(32), dp(48), dp(34));
         scroll.addView(root, new ScrollView.LayoutParams(-1, -2));
 
-        TextView title = text("AmbiP TV Source · v0.4", 30, Color.WHITE);
+        TextView title = text("AmbiP TV Source · v0.5", 30, Color.WHITE);
         root.addView(title);
-        TextView desc = text("Lean TV capture source. The projector handles interpolation, Color Cloud, dynamics and the unified phone Control Center.", 17, 0xffb9c2ce);
+        TextView desc = text("Ultra-lean 128×72 capture source with compact binary light transport. Smoothing, interpolation, Color Cloud and calibration run on the projector.", 17, 0xffb9c2ce);
         desc.setGravity(Gravity.CENTER);
         desc.setPadding(0, dp(10), 0, dp(24));
         root.addView(desc, new LinearLayout.LayoutParams(-1, -2));
@@ -82,38 +74,24 @@ public final class TvSourceActivity extends ComponentActivity {
         stats = text("0 fps", 16, 0xffaab2bd); stats.setPadding(0,0,0,dp(22)); root.addView(stats);
 
         TextView portal = text("MAIN SETTINGS: open http://PROJECTOR-IP:8081 on your phone", 16, 0xffb2ffb7);
-        portal.setGravity(Gravity.CENTER);
-        portal.setPadding(dp(12), dp(10), dp(12), dp(16));
-        root.addView(portal);
+        portal.setGravity(Gravity.CENTER); portal.setPadding(dp(12), dp(10), dp(12), dp(16)); root.addView(portal);
 
-        LinearLayout row1 = new LinearLayout(this);
-        row1.setOrientation(LinearLayout.HORIZONTAL);
-        row1.setGravity(Gravity.CENTER);
+        LinearLayout row1 = new LinearLayout(this); row1.setOrientation(LinearLayout.HORIZONTAL); row1.setGravity(Gravity.CENTER);
         startButton = tvButton("START CAPTURE", v -> requestCapture());
         TextView stopButton = tvButton("STOP", v -> stopCapture());
-        row1.addView(startButton);
-        row1.addView(stopButton);
-        root.addView(row1);
+        row1.addView(startButton); row1.addView(stopButton); root.addView(row1);
 
-        LinearLayout row2 = new LinearLayout(this);
-        row2.setOrientation(LinearLayout.HORIZONTAL);
-        row2.setGravity(Gravity.CENTER);
+        LinearLayout row2 = new LinearLayout(this); row2.setOrientation(LinearLayout.HORIZONTAL); row2.setGravity(Gravity.CENTER);
         TextView fpsDown = tvButton("FPS −", v -> adjustFps(-1));
         autoButton = tvButton(SourceHub.autoStartOnBoot ? "AUTO BOOT: ON" : "AUTO BOOT: OFF", v -> toggleAutoBoot());
         TextView fpsUp = tvButton("FPS +", v -> adjustFps(1));
-        row2.addView(fpsDown);
-        row2.addView(autoButton);
-        row2.addView(fpsUp);
-        root.addView(row2);
+        row2.addView(fpsDown); row2.addView(autoButton); row2.addView(fpsUp); root.addView(row2);
 
         TextView focusHelp = text("Use the D-pad. The selected control turns bright cyan with a white border.", 15, 0xff81d4fa);
-        focusHelp.setGravity(Gravity.CENTER);
-        focusHelp.setPadding(0,dp(16),0,dp(8));
-        root.addView(focusHelp);
+        focusHelp.setGravity(Gravity.CENTER); focusHelp.setPadding(0,dp(16),0,dp(8)); root.addView(focusHelp);
 
         TextView steps = text("START CAPTURE → approve Android screen sharing → HOME → open Stremio/player.\n\nFPS − / + gives quick TV-side latency tuning. For every other setting, use the single AmbiP Control Center on the projector at port 8081.", 16, 0xffc9d0da);
-        steps.setPadding(0, dp(18), 0, 0);
-        root.addView(steps, new LinearLayout.LayoutParams(-1, -2));
+        steps.setPadding(0, dp(18), 0, 0); root.addView(steps, new LinearLayout.LayoutParams(-1, -2));
 
         setContentView(scroll);
         startButton.post(startButton::requestFocus);
@@ -139,10 +117,7 @@ public final class TvSourceActivity extends ComponentActivity {
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode != CAPTURE_REQUEST) return;
-        if (resultCode != Activity.RESULT_OK || data == null) {
-            SourceHub.setActive(false, "Permission cancelled");
-            return;
-        }
+        if (resultCode != Activity.RESULT_OK || data == null) { SourceHub.setActive(false, "Permission cancelled"); return; }
         Intent service = new Intent(this, TvCaptureService.class);
         service.setAction(TvCaptureService.ACTION_START);
         service.putExtra(TvCaptureService.EXTRA_RESULT_CODE, resultCode);
@@ -152,53 +127,25 @@ public final class TvSourceActivity extends ComponentActivity {
     }
 
     private void stopCapture() {
-        Intent i = new Intent(this, TvCaptureService.class);
-        i.setAction(TvCaptureService.ACTION_STOP);
-        startService(i);
+        Intent i = new Intent(this, TvCaptureService.class); i.setAction(TvCaptureService.ACTION_STOP); startService(i);
     }
 
     private TextView tvButton(String label, View.OnClickListener listener) {
         TextView b = text(label, 16, Color.WHITE);
-        b.setGravity(Gravity.CENTER);
-        b.setFocusable(true);
-        b.setFocusableInTouchMode(true);
-        b.setMinWidth(dp(180));
-        b.setMinHeight(dp(64));
+        b.setGravity(Gravity.CENTER); b.setFocusable(true); b.setFocusableInTouchMode(true); b.setMinWidth(dp(180)); b.setMinHeight(dp(64));
         b.setPadding(dp(20), dp(15), dp(20), dp(15));
-        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-2,-2);
-        p.setMargins(dp(8),dp(8),dp(8),dp(8));
-        b.setLayoutParams(p);
-        b.setOnClickListener(listener);
-        b.setOnFocusChangeListener((v, focused) -> applyFocusVisual((TextView)v, focused));
-        applyFocusVisual(b, false);
-        return b;
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-2,-2); p.setMargins(dp(8),dp(8),dp(8),dp(8)); b.setLayoutParams(p);
+        b.setOnClickListener(listener); b.setOnFocusChangeListener((v, focused) -> applyFocusVisual((TextView)v, focused)); applyFocusVisual(b, false); return b;
     }
 
     private void applyFocusVisual(TextView b, boolean focused) {
-        GradientDrawable bg = new GradientDrawable();
-        bg.setCornerRadius(dp(10));
-        if (focused) {
-            bg.setColor(0xff29b6f6);
-            bg.setStroke(dp(4), Color.WHITE);
-            b.setTextColor(0xff06131a);
-            b.setScaleX(1.07f);
-            b.setScaleY(1.07f);
-            b.setElevation(dp(10));
-        } else {
-            bg.setColor(0xff303842);
-            bg.setStroke(dp(2), 0xff596574);
-            b.setTextColor(Color.WHITE);
-            b.setScaleX(1f);
-            b.setScaleY(1f);
-            b.setElevation(dp(2));
-        }
+        GradientDrawable bg = new GradientDrawable(); bg.setCornerRadius(dp(10));
+        if (focused) { bg.setColor(0xff29b6f6); bg.setStroke(dp(4), Color.WHITE); b.setTextColor(0xff06131a); b.setScaleX(1.07f); b.setScaleY(1.07f); b.setElevation(dp(10)); }
+        else { bg.setColor(0xff303842); bg.setStroke(dp(2), 0xff596574); b.setTextColor(Color.WHITE); b.setScaleX(1f); b.setScaleY(1f); b.setElevation(dp(2)); }
         b.setBackground(bg);
     }
 
-    private TextView text(String value, float size, int color) {
-        TextView t = new TextView(this); t.setText(value); t.setTextSize(size); t.setTextColor(color); return t;
-    }
+    private TextView text(String value, float size, int color) { TextView t = new TextView(this); t.setText(value); t.setTextSize(size); t.setTextColor(color); return t; }
     private int dp(int v){return Math.round(v*getResources().getDisplayMetrics().density);}
-
     @Override protected void onDestroy(){handler.removeCallbacksAndMessages(null);super.onDestroy();}
 }
