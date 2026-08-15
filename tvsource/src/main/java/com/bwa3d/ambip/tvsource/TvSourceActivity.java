@@ -19,7 +19,7 @@ import androidx.activity.ComponentActivity;
 
 import java.util.Locale;
 
-/** TV-friendly launcher. Start capture once, then leave this activity and open the media app. */
+/** Lightweight TV launcher. Once capture starts, this activity goes completely idle in background. */
 public final class TvSourceActivity extends ComponentActivity {
     private static final int CAPTURE_REQUEST = 3101;
     private TextView status, web, stats;
@@ -30,10 +30,10 @@ public final class TvSourceActivity extends ComponentActivity {
             boolean active = SourceHub.isActive();
             status.setText("Source: " + SourceHub.getStatus());
             status.setTextColor(active ? 0xff81c784 : 0xffffb74d);
-            web.setText(active ? "Phone settings: " + SourceHub.getWebUrl() : "Phone settings: available after capture starts");
-            stats.setText(String.format(Locale.US, "%.1f fps · %d×%d analysis · %d stream client(s)",
+            web.setText(active ? "Phone settings: " + SourceHub.getWebUrls() : "Phone settings: available after capture starts");
+            stats.setText(String.format(Locale.US, "%.1f fps · %d×%d analysis · %d client(s)",
                     SourceHub.getFps(), SourceHub.getWidth(), SourceHub.getHeight(), SourceHub.getClients()));
-            handler.postDelayed(this, 700L);
+            handler.postDelayed(this, 1500L);
         }
     };
 
@@ -41,7 +41,18 @@ public final class TvSourceActivity extends ComponentActivity {
         super.onCreate(state);
         SourceHub.load(this);
         buildUi();
+    }
+
+    @Override protected void onStart() {
+        super.onStart();
+        handler.removeCallbacks(refresh);
         handler.post(refresh);
+    }
+
+    @Override protected void onStop() {
+        // Critical on low-end TVs: do not keep polling/updating a hidden Activity behind Stremio.
+        handler.removeCallbacks(refresh);
+        super.onStop();
     }
 
     private void buildUi() {
@@ -54,9 +65,9 @@ public final class TvSourceActivity extends ComponentActivity {
         root.setPadding(dp(48), dp(36), dp(48), dp(36));
         scroll.addView(root, new ScrollView.LayoutParams(-1, -2));
 
-        TextView title = text("AmbiP TV Source", 30, Color.WHITE);
+        TextView title = text("AmbiP TV Source · ECO", 30, Color.WHITE);
         root.addView(title);
-        TextView desc = text("Processes screen colors locally and streams only RGB + luminance + saturation to the projector. No video leaves this TV.", 17, 0xffb9c2ce);
+        TextView desc = text("The TV now does only a tiny 160px capture and sparse RGB edge sampling. Smoothing, color shaping and light-energy processing run on the projector.", 17, 0xffb9c2ce);
         desc.setGravity(Gravity.CENTER);
         desc.setPadding(0, dp(10), 0, dp(28));
         root.addView(desc, new LinearLayout.LayoutParams(-1, -2));
@@ -68,11 +79,11 @@ public final class TvSourceActivity extends ComponentActivity {
         LinearLayout buttons = new LinearLayout(this);
         buttons.setOrientation(LinearLayout.HORIZONTAL);
         buttons.setGravity(Gravity.CENTER);
-        buttons.addView(button("START LIGHT CAPTURE", v -> requestCapture()));
+        buttons.addView(button("START CAPTURE", v -> requestCapture()));
         buttons.addView(button("STOP", v -> stopCapture()));
         root.addView(buttons);
 
-        TextView steps = text("1. Start light capture and approve Android's screen-sharing dialog.\n2. Press HOME and open Stremio / your player.\n3. The foreground service keeps analyzing while the player is on screen.\n4. Open the blue URL from a phone on the same Wi‑Fi to tune capture settings.\n\nAndroid 14+ requires a new approval for every new capture session, so after a reboot or killed capture service you must start it again here.", 16, 0xffc9d0da);
+        TextView steps = text("1. Start capture and approve Android screen sharing.\n2. Press HOME and open Stremio / your player.\n3. Try each LAN URL shown above from your phone; Wi-Fi and Ethernet addresses are both reported when present.\n4. Use the web page to lower FPS/sampling further if this TV still feels heavy.\n\nRecommended for older Oreo TVs: 8–10 fps and 2–3 samples per zone.", 16, 0xffc9d0da);
         steps.setPadding(0, dp(30), 0, 0);
         root.addView(steps, new LinearLayout.LayoutParams(-1, -2));
 
