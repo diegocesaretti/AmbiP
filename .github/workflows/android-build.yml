@@ -2,7 +2,7 @@ name: Android Debug APK
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, feature/v022-save-text-images-api ]
   workflow_dispatch:
 
 jobs:
@@ -36,7 +36,7 @@ jobs:
       - name: Upload projector APK
         uses: actions/upload-artifact@v4
         with:
-          name: AmbiProjector-v0.21-free-tv-text-api
+          name: AmbiProjector-v0.22-save-text-image-api
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
 
