@@ -25,9 +25,11 @@ public final class NetworkProjectorActivity extends ComponentActivity {
     private TextView status, web;
     private EditText source;
     private LightStreamClient client;
+    private StateInterpolator interpolator;
     private ProjectorWebServer webServer;
     private SharedPreferences prefs;
     private boolean panelVisible = true;
+    private boolean calibrationVisible;
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
@@ -36,8 +38,17 @@ public final class NetworkProjectorActivity extends ComponentActivity {
         buildUi();
         applyProjectorSettings();
 
+        interpolator = new StateInterpolator(ambilightView::setState);
+        applyMotionSettings();
+        interpolator.start();
+
         client = new LightStreamClient(new LightStreamClient.Listener() {
-            @Override public void onState(AmbilightState state) { runOnUiThread(() -> ambilightView.setState(state)); }
+            @Override public void onState(AmbilightState state) {
+                runOnUiThread(() -> {
+                    if (interpolator != null) interpolator.push(state);
+                    else ambilightView.setState(state);
+                });
+            }
             @Override public void onStatus(String value, boolean connected) {
                 runOnUiThread(() -> {
                     status.setText(value);
@@ -45,7 +56,7 @@ public final class NetworkProjectorActivity extends ComponentActivity {
                 });
             }
         });
-        client.setSmoothing(prefs.getFloat("networkSmoothing",0.45f));
+        client.setSmoothing(prefs.getFloat("networkSmoothing",0.15f));
 
         String saved = prefs.getString(KEY_SOURCE, "");
         source.setText(saved);
@@ -55,7 +66,8 @@ public final class NetworkProjectorActivity extends ComponentActivity {
             @Override public void onSettingsChanged() {
                 runOnUiThread(() -> {
                     applyProjectorSettings();
-                    if (client != null) client.setSmoothing(prefs.getFloat("networkSmoothing",0.45f));
+                    applyMotionSettings();
+                    if (client != null) client.setSmoothing(prefs.getFloat("networkSmoothing",0.15f));
                 });
             }
             @Override public void onSourceChanged(String value) {
@@ -80,7 +92,7 @@ public final class NetworkProjectorActivity extends ComponentActivity {
         panel.setOrientation(LinearLayout.VERTICAL);
         panel.setPadding(dp(18),dp(16),dp(18),dp(18));
         panel.setBackgroundColor(0xdd080a0d);
-        TextView title = text("AmbiP · Projector v0.16",20,Color.WHITE); panel.addView(title);
+        TextView title = text("AmbiP · Projector v0.17",20,Color.WHITE); panel.addView(title);
         TextView help = text("TV Source address. Example: 192.168.1.50",12,0xffaeb7c5);
         help.setPadding(0,dp(6),0,dp(8)); panel.addView(help);
         source = new EditText(this);
@@ -92,17 +104,18 @@ public final class NetworkProjectorActivity extends ComponentActivity {
         web = text("Phone settings: starting…",12,0xff81d4fa); web.setPadding(0,0,0,dp(9)); web.setTextIsSelectable(true); panel.addView(web);
         LinearLayout buttons = new LinearLayout(this); buttons.setOrientation(LinearLayout.HORIZONTAL);
         buttons.addView(button("CONNECT",v->connect()));
+        buttons.addView(button("CALIBRATE",v->toggleCalibration()));
         buttons.addView(button("BLACK",v->ambilightView.setState(AmbilightState.black())));
         buttons.addView(button("HIDE",v->togglePanel()));
         panel.addView(buttons);
-        TextView note = text("The TV sends raw edge RGB only. Temporal smoothing, Color Cloud, dynamics, brightness/saturation and projection rendering now run on this device. Use the phone URL for tuning.",12,0xff9aa3af);
+        TextView note = text("Interpolation, Color Cloud and geometry run here. CALIBRATE shows the TV mask while you adjust TV borders and outer keystone corners from the phone page.",12,0xff9aa3af);
         note.setPadding(0,dp(8),0,0); panel.addView(note);
-        FrameLayout.LayoutParams pp = new FrameLayout.LayoutParams(Math.min(dp(540),Math.round(getResources().getDisplayMetrics().widthPixels*0.58f)),-2);
+        FrameLayout.LayoutParams pp = new FrameLayout.LayoutParams(Math.min(dp(600),Math.round(getResources().getDisplayMetrics().widthPixels*0.62f)),-2);
         pp.gravity = Gravity.TOP|Gravity.END; pp.setMargins(dp(12),dp(12),dp(12),dp(12)); root.addView(panel,pp);
 
         ambilightView.setGestureListener(new AmbilightView.GestureListener() {
             @Override public void onSingleTap(){togglePanel();}
-            @Override public void onLongPress(){togglePanel();}
+            @Override public void onLongPress(){toggleCalibration();}
             @Override public void onDoubleTap(){ambilightView.setDebug(!ambilightView.isDebug());}
         });
         setContentView(root);
@@ -114,7 +127,7 @@ public final class NetworkProjectorActivity extends ComponentActivity {
         prefs.edit().putString(KEY_SOURCE,value).apply();
         status.setText("Connecting…"); status.setTextColor(0xffffb74d);
         if (client != null) {
-            client.setSmoothing(prefs.getFloat("networkSmoothing",0.45f));
+            client.setSmoothing(prefs.getFloat("networkSmoothing",0.15f));
             client.connect(value);
         }
     }
@@ -122,6 +135,25 @@ public final class NetworkProjectorActivity extends ComponentActivity {
     private void togglePanel() {
         panelVisible = !panelVisible;
         panel.setVisibility(panelVisible ? View.VISIBLE : View.GONE);
+    }
+
+    private void toggleCalibration() {
+        calibrationVisible = !calibrationVisible;
+        ambilightView.setDebug(calibrationVisible);
+        if (calibrationVisible) {
+            panelVisible = true;
+            panel.setVisibility(View.VISIBLE);
+            status.setText("CALIBRATION · use phone settings / Geometry");
+            status.setTextColor(0xff81d4fa);
+        }
+    }
+
+    private void applyMotionSettings() {
+        if (interpolator == null) return;
+        interpolator.setEnabled(prefs.getBoolean("interpolationEnabled",true));
+        interpolator.setDurationMs(prefs.getInt("interpolationMs",78));
+        interpolator.setAdaptive(prefs.getFloat("interpolationAdaptive",0.72f));
+        interpolator.setRenderHz(prefs.getInt("interpolationHz",60));
     }
 
     private void applyProjectorSettings() {
@@ -153,10 +185,10 @@ public final class NetworkProjectorActivity extends ComponentActivity {
     private float[] loadTvRect(){float[] d={0.20f,0.27f,0.80f,0.73f},r=new float[4];for(int i=0;i<4;i++)r[i]=prefs.getFloat("projectedTv"+i,d[i]);return r;}
     private float[][] loadTextFrames(){float[][] d={{0.24f,0.06f,0.76f,0.18f},{0.24f,0.82f,0.76f,0.94f},{0.03f,0.32f,0.18f,0.68f},{0.82f,0.32f,0.97f,0.68f}},f=new float[4][4];for(int z=0;z<4;z++)for(int i=0;i<4;i++)f[z][i]=prefs.getFloat("textFrame"+z+"_"+i,d[z][i]);return f;}
 
-    private TextView button(String s, View.OnClickListener l){TextView b=text(s,13,Color.WHITE);b.setGravity(Gravity.CENTER);b.setPadding(dp(12),dp(9),dp(12),dp(9));b.setBackgroundColor(0xff303842);LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(-2,-2);p.setMargins(dp(3),dp(2),dp(3),dp(2));b.setLayoutParams(p);b.setOnClickListener(l);return b;}
+    private TextView button(String s, View.OnClickListener l){TextView b=text(s,12,Color.WHITE);b.setGravity(Gravity.CENTER);b.setPadding(dp(10),dp(9),dp(10),dp(9));b.setBackgroundColor(0xff303842);LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(-2,-2);p.setMargins(dp(3),dp(2),dp(3),dp(2));b.setLayoutParams(p);b.setOnClickListener(l);return b;}
     private TextView text(String s,float size,int color){TextView v=new TextView(this);v.setText(s);v.setTextSize(size);v.setTextColor(color);return v;}
     private int dp(int v){return Math.round(v*getResources().getDisplayMetrics().density);}
 
-    @Override protected void onResume(){super.onResume();applyProjectorSettings();if(client!=null)client.setSmoothing(prefs.getFloat("networkSmoothing",0.45f));}
-    @Override protected void onDestroy(){if(client!=null)client.stop();if(webServer!=null)webServer.stop();super.onDestroy();}
+    @Override protected void onResume(){super.onResume();applyProjectorSettings();applyMotionSettings();if(client!=null)client.setSmoothing(prefs.getFloat("networkSmoothing",0.15f));}
+    @Override protected void onDestroy(){if(interpolator!=null)interpolator.stop();if(client!=null)client.stop();if(webServer!=null)webServer.stop();super.onDestroy();}
 }
