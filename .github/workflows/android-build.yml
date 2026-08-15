@@ -2,7 +2,7 @@ name: Android Debug APK
 
 on:
   push:
-    branches: [ main, feature/tv-source-architecture ]
+    branches: [ main, feature/projector-network-source ]
   workflow_dispatch:
 
 jobs:
@@ -36,7 +36,7 @@ jobs:
       - name: Upload projector APK
         uses: actions/upload-artifact@v4
         with:
-          name: AmbiProjector-v0.14-dynamic-cloud
+          name: AmbiProjector-v0.15-network-source
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
 
