@@ -17,13 +17,14 @@ import android.view.View;
 
 import androidx.annotation.NonNull;
 
-/** Projection output with editable TV mask, editable context frames and 4-point keystone warp. */
+/** Projection output with editable TV mask, context frames, keystone warp and multiple light renderers. */
 public final class AmbilightView extends View {
     public interface GestureListener { void onSingleTap(); void onLongPress(); void onDoubleTap(); }
     public enum Zone { TOP, BOTTOM, LEFT, RIGHT }
+    public enum ProjectionStyle { EDGE_GRADIENT, COLOR_CLOUD }
     private static final class Overlay { String text; long until; }
 
-    private final Paint paint=new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint paint=new Paint(Paint.ANTI_ALIAS_FLAG|Paint.DITHER_FLAG);
     private final Paint bitmapPaint=new Paint(Paint.ANTI_ALIAS_FLAG|Paint.FILTER_BITMAP_FLAG);
     private final Paint textPaint=new Paint(Paint.ANTI_ALIAS_FLAG);
     private final GestureDetector gestures;
@@ -41,6 +42,16 @@ public final class AmbilightView extends View {
             {0.03f,0.32f,0.18f,0.68f},
             {0.82f,0.32f,0.97f,0.68f}
     };
+
+    // v0.12 Color Cloud defaults. Edge Gradient stays available as a fallback renderer.
+    private volatile ProjectionStyle projectionStyle=ProjectionStyle.COLOR_CLOUD;
+    private float cloudSpread=0.42f;
+    private float cloudRadius=0.26f;
+    private float cloudOpacity=0.64f;
+    private float cloudSaturation=1.32f;
+    private float cloudBrightness=1.08f;
+    private float cloudEdgePull=0.62f;
+
     private Bitmap projectionBuffer;
     private Canvas projectionCanvas;
 
@@ -61,6 +72,14 @@ public final class AmbilightView extends View {
     public boolean isDebug(){return debug;}
     public void setOuterFadeRatio(float value){outerFadeRatio=clamp(value,0.02f,0.42f);invalidate();}
     public float getOuterFadeRatio(){return outerFadeRatio;}
+    public void setProjectionStyle(ProjectionStyle style){if(style==null)return;projectionStyle=style;invalidate();}
+    public ProjectionStyle getProjectionStyle(){return projectionStyle;}
+    public void setCloudSpread(float value){cloudSpread=clamp(value,0.05f,0.90f);invalidate();}
+    public void setCloudRadius(float value){cloudRadius=clamp(value,0.08f,0.50f);invalidate();}
+    public void setCloudOpacity(float value){cloudOpacity=clamp(value,0.05f,1f);invalidate();}
+    public void setCloudSaturation(float value){cloudSaturation=clamp(value,0.50f,2.50f);invalidate();}
+    public void setCloudBrightness(float value){cloudBrightness=clamp(value,0.40f,1.80f);invalidate();}
+    public void setCloudEdgePull(float value){cloudEdgePull=clamp(value,0f,1f);invalidate();}
     public void setKeystoneCorners(float[] c){if(c==null||c.length!=8)return;float[] n=c.clone();for(int i=0;i<8;i++)n[i]=clamp(n[i],0f,1f);keystoneCorners=n;invalidate();}
     public float[] getKeystoneCorners(){return keystoneCorners.clone();}
     public void setTvRect(float[] r){if(r==null||r.length!=4)return;tvRect=sanitizeRect(r.clone(),0.08f);invalidate();}
@@ -98,17 +117,114 @@ public final class AmbilightView extends View {
 
     private void drawProjection(Canvas canvas,int w,int h){
         RectF tv=tvMask(w,h);
-        drawContinuousSides(canvas,tv);
-        drawSmoothCorner(canvas,tv,true,true,edgeAverage(state.top,true),edgeAverage(state.left,true));
-        drawSmoothCorner(canvas,tv,false,true,edgeAverage(state.top,false),edgeAverage(state.right,true));
-        drawSmoothCorner(canvas,tv,true,false,edgeAverage(state.bottom,true),edgeAverage(state.left,false));
-        drawSmoothCorner(canvas,tv,false,false,edgeAverage(state.bottom,false),edgeAverage(state.right,false));
+        if(projectionStyle==ProjectionStyle.COLOR_CLOUD)drawColorCloud(canvas,tv);
+        else drawEdgeGradient(canvas,tv);
         drawOuterBlackVignette(canvas);
         paint.setShader(null);paint.setColor(Color.BLACK);canvas.drawRect(tv,paint);
         drawContextFrames(canvas);if(debug)drawDebug(canvas,tv);
     }
 
     private RectF tvMask(int w,int h){float[] r=tvRect;return new RectF(r[0]*w,r[1]*h,r[2]*w,r[3]*h);}
+
+    private void drawEdgeGradient(Canvas canvas,RectF tv){
+        drawContinuousSides(canvas,tv);
+        drawSmoothCorner(canvas,tv,true,true,edgeAverage(state.top,true),edgeAverage(state.left,true));
+        drawSmoothCorner(canvas,tv,false,true,edgeAverage(state.top,false),edgeAverage(state.right,true));
+        drawSmoothCorner(canvas,tv,true,false,edgeAverage(state.bottom,true),edgeAverage(state.left,false));
+        drawSmoothCorner(canvas,tv,false,false,edgeAverage(state.bottom,false),edgeAverage(state.right,false));
+    }
+
+    /**
+     * Organic projected-light renderer. It intentionally reduces the 32x18 edge samples to a smaller
+     * set of overlapping radial fields. Neighbor samples are averaged before drawing so adjacent colors
+     * merge into large clouds instead of looking like LED segments.
+     */
+    private void drawColorCloud(Canvas c,RectF tv){
+        float minSide=Math.min(getWidth(),getHeight());
+        float baseRadius=Math.max(24f,minSide*cloudRadius);
+        float radiusScale=0.72f+cloudSpread*0.95f;
+
+        drawHorizontalClouds(c,state.top,true,tv,baseRadius*radiusScale,6);
+        drawHorizontalClouds(c,state.bottom,false,tv,baseRadius*radiusScale,6);
+        drawVerticalClouds(c,state.left,true,tv,baseRadius*radiusScale,4);
+        drawVerticalClouds(c,state.right,false,tv,baseRadius*radiusScale,4);
+
+        // Larger blended corner fields remove the last hint of four independent sides.
+        drawCornerCloud(c,tv,true,true,mix(edgeAverage(state.top,true),edgeAverage(state.left,true)),baseRadius*1.28f);
+        drawCornerCloud(c,tv,false,true,mix(edgeAverage(state.top,false),edgeAverage(state.right,true)),baseRadius*1.28f);
+        drawCornerCloud(c,tv,true,false,mix(edgeAverage(state.bottom,true),edgeAverage(state.left,false)),baseRadius*1.28f);
+        drawCornerCloud(c,tv,false,false,mix(edgeAverage(state.bottom,false),edgeAverage(state.right,false)),baseRadius*1.28f);
+    }
+
+    private void drawHorizontalClouds(Canvas c,int[] colors,boolean top,RectF tv,float radius,int count){
+        if(colors==null||colors.length==0)return;
+        float available=top?tv.top:getHeight()-tv.bottom;
+        float pull=0.82f-0.67f*cloudEdgePull;
+        float cy=top?tv.top-available*pull:tv.bottom+available*pull;
+        for(int i=0;i<count;i++){
+            float t=count==1?0.5f:i/(float)(count-1);
+            float cx=tv.left+tv.width()*t;
+            int color=boostCloudColor(sampleWindow(colors,t,2));
+            float lum=luminance01(color);
+            float rr=radius*(0.91f+lum*0.19f);
+            drawCloudBlob(c,cx,cy,rr,color,0.92f);
+        }
+    }
+
+    private void drawVerticalClouds(Canvas c,int[] colors,boolean left,RectF tv,float radius,int count){
+        if(colors==null||colors.length==0)return;
+        float available=left?tv.left:getWidth()-tv.right;
+        float pull=0.82f-0.67f*cloudEdgePull;
+        float cx=left?tv.left-available*pull:tv.right+available*pull;
+        for(int i=0;i<count;i++){
+            float t=count==1?0.5f:i/(float)(count-1);
+            float cy=tv.top+tv.height()*t;
+            int color=boostCloudColor(sampleWindow(colors,t,2));
+            float lum=luminance01(color);
+            float rr=radius*(0.88f+lum*0.18f);
+            drawCloudBlob(c,cx,cy,rr,color,0.82f);
+        }
+    }
+
+    private void drawCornerCloud(Canvas c,RectF tv,boolean left,boolean top,int color,float radius){
+        float availableX=left?tv.left:getWidth()-tv.right;
+        float availableY=top?tv.top:getHeight()-tv.bottom;
+        float pull=0.70f-0.48f*cloudEdgePull;
+        float cx=(left?tv.left:tv.right)+(left?-1f:1f)*availableX*pull;
+        float cy=(top?tv.top:tv.bottom)+(top?-1f:1f)*availableY*pull;
+        drawCloudBlob(c,cx,cy,radius,boostCloudColor(color),0.72f);
+    }
+
+    private void drawCloudBlob(Canvas c,float cx,float cy,float radius,int color,float strength){
+        int alpha=Math.round(255f*cloudOpacity*strength);
+        int center=withAlpha(color,alpha);
+        int mid=withAlpha(color,Math.round(alpha*0.55f));
+        int faint=withAlpha(color,Math.round(alpha*0.16f));
+        paint.setShader(new RadialGradient(cx,cy,Math.max(2f,radius),new int[]{center,mid,faint,0x00000000},new float[]{0f,0.33f,0.72f,1f},Shader.TileMode.CLAMP));
+        c.drawCircle(cx,cy,Math.max(2f,radius),paint);
+    }
+
+    private int sampleWindow(int[] src,float t,int halfWindow){
+        if(src==null||src.length==0)return Color.BLACK;
+        int center=Math.round(clamp(t,0f,1f)*(src.length-1));
+        int from=Math.max(0,center-halfWindow),to=Math.min(src.length-1,center+halfWindow);
+        int rs=0,gs=0,bs=0,n=0;
+        for(int i=from;i<=to;i++){int color=src[i];rs+=(color>>16)&255;gs+=(color>>8)&255;bs+=color&255;n++;}
+        if(n==0)return Color.BLACK;
+        return 0xFF000000|((rs/n)<<16)|((gs/n)<<8)|(bs/n);
+    }
+
+    private int boostCloudColor(int color){
+        float[] hsv=new float[3];Color.colorToHSV(color,hsv);
+        hsv[1]=clamp(hsv[1]*cloudSaturation,0f,1f);
+        hsv[2]=clamp(hsv[2]*cloudBrightness,0f,1f);
+        return Color.HSVToColor(hsv);
+    }
+
+    private float luminance01(int color){
+        float r=Color.red(color)/255f,g=Color.green(color)/255f,b=Color.blue(color)/255f;
+        return clamp(0.2126f*r+0.7152f*g+0.0722f*b,0f,1f);
+    }
 
     private void drawContinuousSides(Canvas c,RectF tv){
         int[] top=softCornerEnds(state.top,mix(edgeAverage(state.top,true),edgeAverage(state.left,true)),mix(edgeAverage(state.top,false),edgeAverage(state.right,true)));
@@ -165,7 +281,7 @@ public final class AmbilightView extends View {
     private boolean alive(Overlay o,long now){if(o.text==null||now>o.until){o.text=null;return false;}return true;}
     private boolean isAnyOverlayAlive(long now){return alive(topOverlay,now)||alive(bottomOverlay,now)||alive(leftOverlay,now)||alive(rightOverlay,now);}
 
-    private void drawDebug(Canvas canvas,RectF tv){paint.setShader(null);paint.setStyle(Paint.Style.STROKE);paint.setStrokeWidth(2f);paint.setColor(0x88FFFFFF);canvas.drawRect(tv,paint);paint.setStyle(Paint.Style.FILL);textPaint.setTextAlign(Paint.Align.LEFT);textPaint.setTextSize(Math.max(15f,getHeight()*0.022f));textPaint.setColor(Color.WHITE);float x=18f,y=28f,line=textPaint.getTextSize()*1.35f;canvas.drawText("Ambi Projector v0.10",x,y,textPaint);y+=line;canvas.drawText(String.format("Camera: %dx%d   %.1f fps",state.sourceWidth,state.sourceHeight,state.fps),x,y,textPaint);y+=line;canvas.drawText("Tap: settings · Long: camera TV · Layout: projected TV/text",x,y,textPaint);}
+    private void drawDebug(Canvas canvas,RectF tv){paint.setShader(null);paint.setStyle(Paint.Style.STROKE);paint.setStrokeWidth(2f);paint.setColor(0x88FFFFFF);canvas.drawRect(tv,paint);paint.setStyle(Paint.Style.FILL);textPaint.setTextAlign(Paint.Align.LEFT);textPaint.setTextSize(Math.max(15f,getHeight()*0.022f));textPaint.setColor(Color.WHITE);float x=18f,y=28f,line=textPaint.getTextSize()*1.35f;canvas.drawText("Ambi Projector v0.12 · "+(projectionStyle==ProjectionStyle.COLOR_CLOUD?"COLOR CLOUD":"EDGE"),x,y,textPaint);y+=line;canvas.drawText(String.format("Camera: %dx%d   %.1f fps",state.sourceWidth,state.sourceHeight,state.fps),x,y,textPaint);y+=line;canvas.drawText("Tap: settings · Long: camera TV · Layout: projected TV/text",x,y,textPaint);}
 
     private float[] positions(int n){float[] p=new float[n];if(n==1){p[0]=0f;return p;}for(int i=0;i<n;i++)p[i]=i/(float)(n-1);return p;}
     private int mix(int a,int b){return mixWeighted(a,b,0.5f);}
