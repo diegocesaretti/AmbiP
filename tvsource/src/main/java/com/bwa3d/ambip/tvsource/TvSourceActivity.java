@@ -21,8 +21,9 @@ import java.util.Locale;
 
 /** Lightweight TV launcher. Once capture starts, this activity goes completely idle in background. */
 public final class TvSourceActivity extends ComponentActivity {
+    public static final String EXTRA_BOOT_REQUEST = "ambipBootCaptureRequest";
     private static final int CAPTURE_REQUEST = 3101;
-    private TextView status, web, stats;
+    private TextView status, web, stats, autoButton;
     private final Handler handler = new Handler(Looper.getMainLooper());
 
     private final Runnable refresh = new Runnable() {
@@ -31,8 +32,9 @@ public final class TvSourceActivity extends ComponentActivity {
             status.setText("Source: " + SourceHub.getStatus());
             status.setTextColor(active ? 0xff81c784 : 0xffffb74d);
             web.setText(active ? "Phone settings: " + SourceHub.getWebUrls() : "Phone settings: available after capture starts");
-            stats.setText(String.format(Locale.US, "%.1f fps · %d×%d analysis · %d client(s)",
-                    SourceHub.getFps(), SourceHub.getWidth(), SourceHub.getHeight(), SourceHub.getClients()));
+            stats.setText(String.format(Locale.US, "%.1f fps · %d×%d analysis · %d client(s) · target %d fps",
+                    SourceHub.getFps(), SourceHub.getWidth(), SourceHub.getHeight(), SourceHub.getClients(), SourceHub.targetFps));
+            if (autoButton != null) autoButton.setText(SourceHub.autoStartOnBoot ? "AUTO BOOT: ON" : "AUTO BOOT: OFF");
             handler.postDelayed(this, 1500L);
         }
     };
@@ -41,6 +43,9 @@ public final class TvSourceActivity extends ComponentActivity {
         super.onCreate(state);
         SourceHub.load(this);
         buildUi();
+        if (getIntent().getBooleanExtra(EXTRA_BOOT_REQUEST,false) && SourceHub.autoStartOnBoot && !SourceHub.isActive()) {
+            handler.postDelayed(this::requestCapture, 900L);
+        }
     }
 
     @Override protected void onStart() {
@@ -65,9 +70,9 @@ public final class TvSourceActivity extends ComponentActivity {
         root.setPadding(dp(48), dp(36), dp(48), dp(36));
         scroll.addView(root, new ScrollView.LayoutParams(-1, -2));
 
-        TextView title = text("AmbiP TV Source · ECO", 30, Color.WHITE);
+        TextView title = text("AmbiP TV Source · v0.3", 30, Color.WHITE);
         root.addView(title);
-        TextView desc = text("The TV now does only a tiny 160px capture and sparse RGB edge sampling. Smoothing, color shaping and light-energy processing run on the projector.", 17, 0xffb9c2ce);
+        TextView desc = text("The TV only performs a tiny ~128×72 MediaProjection and sparse RGB edge sampling. Interpolation, smoothing and all Color Cloud processing run on the projector.", 17, 0xffb9c2ce);
         desc.setGravity(Gravity.CENTER);
         desc.setPadding(0, dp(10), 0, dp(28));
         root.addView(desc, new LinearLayout.LayoutParams(-1, -2));
@@ -81,13 +86,20 @@ public final class TvSourceActivity extends ComponentActivity {
         buttons.setGravity(Gravity.CENTER);
         buttons.addView(button("START CAPTURE", v -> requestCapture()));
         buttons.addView(button("STOP", v -> stopCapture()));
+        autoButton = button(SourceHub.autoStartOnBoot ? "AUTO BOOT: ON" : "AUTO BOOT: OFF", v -> toggleAutoBoot());
+        buttons.addView(autoButton);
         root.addView(buttons);
 
-        TextView steps = text("1. Start capture and approve Android screen sharing.\n2. Press HOME and open Stremio / your player.\n3. Try each LAN URL shown above from your phone; Wi-Fi and Ethernet addresses are both reported when present.\n4. Use the web page to lower FPS/sampling further if this TV still feels heavy.\n\nRecommended for older Oreo TVs: 8–10 fps and 2–3 samples per zone.", 16, 0xffc9d0da);
+        TextView steps = text("1. Start capture and approve Android screen sharing.\n2. Press HOME and open Stremio / your player.\n3. Open the blue URL from a phone to choose 4–30 target FPS, edge depth and samples/zone.\n4. AUTO BOOT on Oreo opens AmbiP automatically after a TV restart and brings up the mandatory capture permission screen.\n\nStart with 8–12 fps / 2 samples. If the TV stays responsive, try 16–20 fps for lower real latency.", 16, 0xffc9d0da);
         steps.setPadding(0, dp(30), 0, 0);
         root.addView(steps, new LinearLayout.LayoutParams(-1, -2));
 
         setContentView(scroll);
+    }
+
+    private void toggleAutoBoot() {
+        SourceHub.applySettings(this,null,null,null,!SourceHub.autoStartOnBoot);
+        if(autoButton!=null) autoButton.setText(SourceHub.autoStartOnBoot ? "AUTO BOOT: ON" : "AUTO BOOT: OFF");
     }
 
     private void requestCapture() {
@@ -117,13 +129,13 @@ public final class TvSourceActivity extends ComponentActivity {
     }
 
     private TextView button(String label, View.OnClickListener listener) {
-        TextView b = text(label, 17, Color.WHITE);
+        TextView b = text(label, 16, Color.WHITE);
         b.setGravity(Gravity.CENTER);
         b.setFocusable(true);
-        b.setPadding(dp(24), dp(17), dp(24), dp(17));
+        b.setPadding(dp(18), dp(15), dp(18), dp(15));
         b.setBackgroundColor(0xff303842);
         LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-2,-2);
-        p.setMargins(dp(8),dp(8),dp(8),dp(8));
+        p.setMargins(dp(6),dp(8),dp(6),dp(8));
         b.setLayoutParams(p);
         b.setOnClickListener(listener);
         return b;
