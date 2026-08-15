@@ -3,10 +3,12 @@ package com.bwa3d.ambip.tvsource;
 import android.content.Context;
 import android.content.SharedPreferences;
 
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.Locale;
 import java.util.concurrent.atomic.AtomicLong;
 
-/** Shared runtime state and compact ambip-light-v2 encoder. */
+/** Shared runtime state plus compact ambip-light-v3 binary encoder. */
 public final class SourceHub {
     private SourceHub() {}
 
@@ -14,17 +16,18 @@ public final class SourceHub {
     public static final int V_SEGMENTS = 18;
     public static final int WEB_PORT = 8080;
     private static final String PREFS = "ambip_tv_source";
-    private static final int CONFIG_VERSION = 3;
+    private static final int CONFIG_VERSION = 4;
+    private static final int BINARY_HEADER = 18;
 
     private static volatile boolean active;
     private static volatile String status = "Idle";
     private static volatile String webUrl = "http://127.0.0.1:" + WEB_PORT;
     private static volatile String webUrls = webUrl;
-    private static volatile String latestJson = "{\"v\":2,\"protocol\":\"ambip-light-v2\",\"active\":false}";
     private static volatile float fps;
     private static volatile int width;
     private static volatile int height;
     private static volatile int clients;
+    private static volatile byte[] latestBinary;
     private static final AtomicLong sequence = new AtomicLong();
 
     public static volatile int targetFps = 8;
@@ -52,7 +55,7 @@ public final class SourceHub {
         stripRatio = clamp(p.getFloat("stripRatio", 0.08f), 0.03f, 0.20f);
         samplesPerZone = clamp(p.getInt("samplesPerZone", 2), 1, 6);
         autoStartOnBoot = p.getBoolean("autoStartOnBoot", false);
-        if (version < CONFIG_VERSION) p.edit().putInt("configVersion", CONFIG_VERSION).putBoolean("autoStartOnBoot", autoStartOnBoot).apply();
+        if (version < CONFIG_VERSION) p.edit().putInt("configVersion", CONFIG_VERSION).apply();
     }
 
     public static void save(Context context) {
@@ -76,60 +79,72 @@ public final class SourceHub {
     public static void setActive(boolean value, String text) {
         active = value;
         status = text == null ? "" : text;
-        if (!value) latestJson = "{\"v\":2,\"protocol\":\"ambip-light-v2\",\"active\":false}";
+        if (!value) latestBinary = null;
     }
     public static boolean isActive() { return active; }
     public static String getStatus() { return status; }
     public static String getWebUrl() { return webUrl; }
     public static String getWebUrls() { return webUrls; }
-    public static String getLatestJson() { return latestJson; }
     public static float getFps() { return fps; }
     public static int getWidth() { return width; }
     public static int getHeight() { return height; }
     public static int getClients() { return clients; }
     public static void setClients(int value) { clients = Math.max(0, value); }
+    public static byte[] getLatestBinary() { return latestBinary; }
 
     public static void setWebAddresses(String primary, String all) {
         if (primary != null && !primary.isEmpty()) webUrl = primary;
         if (all != null && !all.isEmpty()) webUrls = all;
     }
 
-    public static String publish(int[] top, int[] right, int[] bottom, int[] left,
-                                 float captureFps, int sourceWidth, int sourceHeight) {
+    /**
+     * Builds a ~318-byte packet instead of JSON. Layout:
+     * ABP3, version, flags, seq, fps*100, width, height, H count, V count, then RGB bytes in
+     * top/right/bottom/left order.
+     */
+    public static byte[] publishBinary(int[] top, int[] right, int[] bottom, int[] left,
+                                       float captureFps, int sourceWidth, int sourceHeight) {
         fps = captureFps;
         width = sourceWidth;
         height = sourceHeight;
-        StringBuilder sb = new StringBuilder(1800);
-        sb.append('{');
-        sb.append("\"v\":2,\"protocol\":\"ambip-light-v2\",\"active\":true,");
-        sb.append("\"seq\":").append(sequence.incrementAndGet()).append(',');
-        sb.append("\"t\":").append(System.currentTimeMillis()).append(',');
-        sb.append("\"fps\":").append(String.format(Locale.US, "%.1f", captureFps)).append(',');
-        sb.append("\"w\":").append(sourceWidth).append(',');
-        sb.append("\"h\":").append(sourceHeight).append(',');
-        appendPacked(sb, "top", top); sb.append(',');
-        appendPacked(sb, "right", right); sb.append(',');
-        appendPacked(sb, "bottom", bottom); sb.append(',');
-        appendPacked(sb, "left", left);
-        sb.append('}');
-        latestJson = sb.toString();
-        return latestJson;
+        int bytes = BINARY_HEADER + (H_SEGMENTS + V_SEGMENTS + H_SEGMENTS + V_SEGMENTS) * 3;
+        ByteBuffer b = ByteBuffer.allocate(bytes).order(ByteOrder.BIG_ENDIAN);
+        b.put((byte)'A').put((byte)'B').put((byte)'P').put((byte)'3');
+        b.put((byte)3).put((byte)0);
+        b.putInt((int)sequence.incrementAndGet());
+        b.putShort((short)clamp(Math.round(captureFps * 100f),0,65535));
+        b.putShort((short)clamp(sourceWidth,0,65535));
+        b.putShort((short)clamp(sourceHeight,0,65535));
+        b.put((byte)H_SEGMENTS).put((byte)V_SEGMENTS);
+        putColors(b,top,H_SEGMENTS);
+        putColors(b,right,V_SEGMENTS);
+        putColors(b,bottom,H_SEGMENTS);
+        putColors(b,left,V_SEGMENTS);
+        latestBinary = b.array();
+        return latestBinary;
+    }
+
+    private static void putColors(ByteBuffer b,int[] colors,int count) {
+        for(int i=0;i<count;i++) {
+            int c = colors[Math.min(i,colors.length-1)];
+            b.put((byte)((c>>16)&255));
+            b.put((byte)((c>>8)&255));
+            b.put((byte)(c&255));
+        }
+    }
+
+    /** Lightweight diagnostics; no per-frame JSON encoding is done anymore. */
+    public static String stateJson() {
+        return String.format(Locale.US,
+                "{\"v\":3,\"protocol\":\"ambip-light-v3-binary\",\"active\":%s,\"fpsActual\":%.1f,\"w\":%d,\"h\":%d,\"clients\":%d}",
+                active ? "true" : "false", fps, width, height, clients);
     }
 
     public static String settingsJson() {
         return String.format(Locale.US,
-                "{\"active\":%s,\"status\":\"%s\",\"url\":\"%s\",\"urls\":\"%s\",\"clients\":%d,\"fps\":%d,\"strip\":%.3f,\"samples\":%d,\"autostart\":%s,\"analysisW\":%d,\"analysisH\":%d}",
+                "{\"active\":%s,\"status\":\"%s\",\"url\":\"%s\",\"urls\":\"%s\",\"clients\":%d,\"fps\":%d,\"fpsActual\":%.1f,\"strip\":%.3f,\"samples\":%d,\"autostart\":%s,\"analysisW\":%d,\"analysisH\":%d,\"protocol\":\"v3-binary\"}",
                 active ? "true" : "false", escape(status), escape(webUrl), escape(webUrls), clients,
-                targetFps, stripRatio, samplesPerZone, autoStartOnBoot ? "true" : "false", width, height);
-    }
-
-    private static void appendPacked(StringBuilder sb, String name, int[] colors) {
-        sb.append('\"').append(name).append("\":[");
-        for (int i = 0; i < colors.length; i++) {
-            if (i > 0) sb.append(',');
-            sb.append(colors[i] & 0x00ffffff);
-        }
-        sb.append(']');
+                targetFps, fps, stripRatio, samplesPerZone, autoStartOnBoot ? "true" : "false", width, height);
     }
 
     private static String escape(String s) {
