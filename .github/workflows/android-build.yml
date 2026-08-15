@@ -2,7 +2,7 @@ name: Android Debug APK
 
 on:
   push:
-    branches: [ main, feature/color-cloud ]
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
