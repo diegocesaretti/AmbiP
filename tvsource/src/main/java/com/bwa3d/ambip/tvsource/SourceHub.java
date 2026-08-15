@@ -26,16 +26,16 @@ public final class SourceHub {
     private static volatile int clients;
     private static final AtomicLong sequence = new AtomicLong();
 
-    // Conservative defaults for older Android TV hardware.
-    public static volatile int targetFps = 10;
+    // Deliberately conservative defaults for old Android TV hardware such as Oreo devices.
+    public static volatile int targetFps = 8;
     public static volatile float stripRatio = 0.08f;
-    public static volatile int samplesPerZone = 3;
+    public static volatile int samplesPerZone = 2;
 
     public static void load(Context context) {
         SharedPreferences p = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
-        targetFps = clamp(p.getInt("targetFps", 10), 4, 20);
+        targetFps = clamp(p.getInt("targetFps", 8), 4, 20);
         stripRatio = clamp(p.getFloat("stripRatio", 0.08f), 0.03f, 0.20f);
-        samplesPerZone = clamp(p.getInt("samplesPerZone", 3), 1, 6);
+        samplesPerZone = clamp(p.getInt("samplesPerZone", 2), 1, 6);
     }
 
     public static void save(Context context) {
