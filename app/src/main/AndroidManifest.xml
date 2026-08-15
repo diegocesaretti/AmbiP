@@ -24,6 +24,8 @@
         <activity
             android:name=".ScreenCaptureDebugActivity"
             android:label="AmbiP Screen Debug"
+            android:screenOrientation="landscape"
+            android:configChanges="orientation|screenSize|keyboardHidden"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
