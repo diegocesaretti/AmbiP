@@ -1,6 +1,7 @@
 package com.bwa3d.ambip.tvsource;
 
 import android.content.Context;
+import android.util.Base64;
 import android.util.Log;
 
 import java.io.BufferedInputStream;
@@ -17,9 +18,11 @@ import java.net.Socket;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
-import java.util.Base64;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
@@ -27,15 +30,15 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-/** Dependency-free HTTP settings server + WebSocket light-data stream. */
+/** Small API-26-safe HTTP settings server plus WebSocket light stream. */
 public final class SourceWebServer {
     private static final String TAG = "AmbiPSourceWeb";
     private static final String WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
     private final Context context;
     private final int port;
-    private final ExecutorService pool = Executors.newCachedThreadPool();
-    private final Set<Socket> wsClients = Collections.newSetFromMap(new ConcurrentHashMap<>());
+    private final ExecutorService pool = Executors.newFixedThreadPool(4);
+    private final Set<Socket> wsClients = Collections.newSetFromMap(new ConcurrentHashMap<Socket, Boolean>());
     private volatile boolean running;
     private ServerSocket serverSocket;
 
@@ -45,14 +48,23 @@ public final class SourceWebServer {
     }
 
     public synchronized String start() throws IOException {
-        if (running) return getUrl();
-        serverSocket = new ServerSocket(port);
+        if (running) return SourceHub.getWebUrl();
+        serverSocket = new ServerSocket(port, 24, InetAddress.getByName("0.0.0.0"));
         serverSocket.setReuseAddress(true);
         running = true;
         pool.execute(this::acceptLoop);
-        String url = getUrl();
-        SourceHub.setWebUrl(url);
-        return url;
+
+        List<String> ips = localIpv4Addresses();
+        String primaryIp = ips.isEmpty() ? "127.0.0.1" : ips.get(0);
+        StringBuilder all = new StringBuilder();
+        for (String ip : ips) {
+            if (all.length() > 0) all.append("   ");
+            all.append("http://").append(ip).append(':').append(port);
+        }
+        if (all.length() == 0) all.append("http://127.0.0.1:").append(port);
+        String primary = "http://" + primaryIp + ":" + port;
+        SourceHub.setWebAddresses(primary, all.toString());
+        return primary;
     }
 
     public synchronized void stop() {
@@ -64,10 +76,8 @@ public final class SourceWebServer {
         pool.shutdownNow();
     }
 
-    public String getUrl() { return "http://" + localIpv4() + ":" + port; }
-
     public void broadcast(String json) {
-        if (json == null || json.isEmpty()) return;
+        if (json == null || json.length() == 0 || wsClients.isEmpty()) return;
         byte[] payload = json.getBytes(StandardCharsets.UTF_8);
         for (Socket socket : wsClients) {
             try {
@@ -85,6 +95,7 @@ public final class SourceWebServer {
             try {
                 Socket socket = serverSocket.accept();
                 socket.setTcpNoDelay(true);
+                socket.setSoTimeout(10000);
                 pool.execute(() -> handle(socket));
             } catch (IOException e) {
                 if (running) Log.w(TAG, "accept", e);
@@ -97,34 +108,40 @@ public final class SourceWebServer {
         try {
             BufferedInputStream in = new BufferedInputStream(socket.getInputStream());
             String requestLine = readLine(in);
-            if (requestLine == null || requestLine.isEmpty()) return;
-            Map<String,String> headers = new HashMap<>();
+            if (requestLine == null || requestLine.length() == 0) return;
+            Map<String, String> headers = new HashMap<>();
             String line;
-            while ((line = readLine(in)) != null && !line.isEmpty()) {
+            while ((line = readLine(in)) != null && line.length() > 0) {
                 int p = line.indexOf(':');
-                if (p > 0) headers.put(line.substring(0,p).trim().toLowerCase(Locale.US), line.substring(p+1).trim());
+                if (p > 0) headers.put(line.substring(0, p).trim().toLowerCase(Locale.US), line.substring(p + 1).trim());
             }
+
             String[] first = requestLine.split(" ");
             String rawPath = first.length > 1 ? first[1] : "/";
             String path = rawPath;
             String query = "";
             int q = rawPath.indexOf('?');
-            if (q >= 0) { path = rawPath.substring(0,q); query = rawPath.substring(q+1); }
+            if (q >= 0) { path = rawPath.substring(0, q); query = rawPath.substring(q + 1); }
 
             if ("/ws".equals(path) && "websocket".equalsIgnoreCase(headers.get("upgrade"))) {
                 String key = headers.get("sec-websocket-key");
                 if (key == null) return;
                 OutputStream out = socket.getOutputStream();
                 String response = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " + websocketAccept(key) + "\r\n\r\n";
-                out.write(response.getBytes(StandardCharsets.US_ASCII)); out.flush();
+                out.write(response.getBytes(StandardCharsets.US_ASCII));
+                out.flush();
                 upgraded = true;
-                wsClients.add(socket); SourceHub.setClients(wsClients.size());
+                socket.setSoTimeout(0);
+                wsClients.add(socket);
+                SourceHub.setClients(wsClients.size());
                 synchronized (socket) { writeWebSocketFrame(out, SourceHub.getLatestJson().getBytes(StandardCharsets.UTF_8)); }
                 keepWebSocketAlive(in, socket);
                 return;
             }
 
-            if ("/state.json".equals(path)) {
+            if ("/health".equals(path)) {
+                send(socket, "text/plain; charset=utf-8", "OK AmbiP TV Source\n".getBytes(StandardCharsets.UTF_8));
+            } else if ("/state.json".equals(path)) {
                 send(socket, "application/json; charset=utf-8", SourceHub.getLatestJson().getBytes(StandardCharsets.UTF_8));
             } else if ("/api/settings".equals(path)) {
                 applySettings(parseQuery(query));
@@ -143,56 +160,70 @@ public final class SourceWebServer {
         }
     }
 
-    private void applySettings(Map<String,String> q) {
-        Integer fps = intOrNull(q.get("fps"));
-        Float strip = floatOrNull(q.get("strip"));
-        Float smooth = floatOrNull(q.get("smooth"));
-        Float bright = floatOrNull(q.get("brightness"));
-        Float sat = floatOrNull(q.get("saturation"));
-        SourceHub.applySettings(context, fps, strip, smooth, bright, sat);
+    private void applySettings(Map<String, String> q) {
+        SourceHub.applySettings(context, intOrNull(q.get("fps")), floatOrNull(q.get("strip")), intOrNull(q.get("samples")));
     }
 
     private void keepWebSocketAlive(InputStream in, Socket socket) throws IOException {
         while (running && !socket.isClosed()) {
             int b0 = in.read(); if (b0 < 0) break;
             int b1 = in.read(); if (b1 < 0) break;
-            int opcode = b0 & 0x0f; boolean masked = (b1 & 0x80) != 0;
-            long length = b1 & 0x7f;
-            if (length == 126) length = ((long)(in.read() & 0xff) << 8) | (in.read() & 0xff);
-            else if (length == 127) { length = 0; for (int i=0;i<8;i++) length = (length << 8) | (in.read() & 0xff); }
-            byte[] mask = masked ? in.readNBytes(4) : null;
+            int opcode = b0 & 15;
+            boolean masked = (b1 & 128) != 0;
+            long length = b1 & 127;
+            if (length == 126) {
+                int a = in.read(), b = in.read(); if (a < 0 || b < 0) break;
+                length = ((long)(a & 255) << 8) | (b & 255);
+            } else if (length == 127) {
+                length = 0;
+                for (int i = 0; i < 8; i++) { int v = in.read(); if (v < 0) return; length = (length << 8) | (v & 255); }
+            }
             if (length > 65536) break;
-            byte[] payload = in.readNBytes((int)length);
-            if (masked && mask != null) for (int i=0;i<payload.length;i++) payload[i] ^= mask[i & 3];
+            byte[] mask = masked ? readExactly(in, 4) : null;
+            byte[] payload = readExactly(in, (int)length);
+            if (masked && mask != null) for (int i = 0; i < payload.length; i++) payload[i] ^= mask[i & 3];
             if (opcode == 8) break;
             if (opcode == 9) synchronized (socket) { writeControlFrame(socket.getOutputStream(), 10, payload); }
         }
     }
 
+    private static byte[] readExactly(InputStream in, int length) throws IOException {
+        byte[] out = new byte[length];
+        int offset = 0;
+        while (offset < length) {
+            int n = in.read(out, offset, length - offset);
+            if (n < 0) throw new IOException("Unexpected EOF");
+            offset += n;
+        }
+        return out;
+    }
+
     private static void writeWebSocketFrame(OutputStream out, byte[] payload) throws IOException {
-        out.write(0x81); int len = payload.length;
+        out.write(0x81);
+        int len = payload.length;
         if (len <= 125) out.write(len);
-        else if (len <= 65535) { out.write(126); out.write((len >> 8) & 0xff); out.write(len & 0xff); }
-        else { out.write(127); long n = len; for (int i=7;i>=0;i--) out.write((int)((n >> (8*i)) & 0xff)); }
+        else if (len <= 65535) { out.write(126); out.write((len >> 8) & 255); out.write(len & 255); }
+        else { out.write(127); long n = len; for (int i = 7; i >= 0; i--) out.write((int)((n >> (8 * i)) & 255)); }
         out.write(payload); out.flush();
     }
 
     private static void writeControlFrame(OutputStream out, int opcode, byte[] payload) throws IOException {
-        out.write(0x80 | (opcode & 0x0f)); out.write(payload.length & 0x7f); out.write(payload); out.flush();
+        out.write(0x80 | (opcode & 15)); out.write(payload.length & 127); out.write(payload); out.flush();
     }
 
     private static String websocketAccept(String key) throws Exception {
         MessageDigest sha1 = MessageDigest.getInstance("SHA-1");
-        return Base64.getEncoder().encodeToString(sha1.digest((key.trim()+WS_GUID).getBytes(StandardCharsets.US_ASCII)));
+        byte[] digest = sha1.digest((key.trim() + WS_GUID).getBytes(StandardCharsets.US_ASCII));
+        return Base64.encodeToString(digest, Base64.NO_WRAP);
     }
 
-    private static Map<String,String> parseQuery(String query) {
-        Map<String,String> out = new HashMap<>();
-        if (query == null || query.isEmpty()) return out;
+    private static Map<String, String> parseQuery(String query) {
+        Map<String, String> out = new HashMap<>();
+        if (query == null || query.length() == 0) return out;
         for (String part : query.split("&")) {
             int p = part.indexOf('=');
-            String k = p < 0 ? part : part.substring(0,p);
-            String v = p < 0 ? "" : part.substring(p+1);
+            String k = p < 0 ? part : part.substring(0, p);
+            String v = p < 0 ? "" : part.substring(p + 1);
             try { out.put(URLDecoder.decode(k, "UTF-8"), URLDecoder.decode(v, "UTF-8")); } catch (Exception ignored) {}
         }
         return out;
@@ -210,7 +241,7 @@ public final class SourceWebServer {
             if (b.size() > 16384) break;
         }
         if (c < 0 && b.size() == 0) return null;
-        return b.toString(StandardCharsets.UTF_8);
+        return new String(b.toByteArray(), StandardCharsets.UTF_8);
     }
 
     private static void send(Socket socket, String type, byte[] body) throws IOException {
@@ -219,37 +250,26 @@ public final class SourceWebServer {
         out.write(head.getBytes(StandardCharsets.US_ASCII)); out.write(body); out.flush();
     }
 
-    private static String localIpv4() {
+    private static List<String> localIpv4Addresses() {
+        List<String[]> found = new ArrayList<>();
         try {
             for (NetworkInterface ni : Collections.list(NetworkInterface.getNetworkInterfaces())) {
                 if (!ni.isUp() || ni.isLoopback()) continue;
-                for (InetAddress a : Collections.list(ni.getInetAddresses())) if (a instanceof Inet4Address && !a.isLoopbackAddress()) return a.getHostAddress();
+                String name = ni.getName() == null ? "" : ni.getName().toLowerCase(Locale.US);
+                if (name.startsWith("tun") || name.startsWith("ppp") || name.startsWith("rmnet")) continue;
+                for (InetAddress a : Collections.list(ni.getInetAddresses())) {
+                    if (!(a instanceof Inet4Address) || a.isLoopbackAddress() || a.isLinkLocalAddress()) continue;
+                    String ip = a.getHostAddress(); if (ip == null) continue;
+                    int score = (name.startsWith("wlan") || name.startsWith("wifi")) ? 0 : (name.startsWith("eth") ? 1 : 2);
+                    found.add(new String[]{String.valueOf(score), ip});
+                }
             }
         } catch (Throwable ignored) {}
-        return "127.0.0.1";
+        Collections.sort(found, new Comparator<String[]>() { @Override public int compare(String[] a, String[] b) { return Integer.compare(Integer.parseInt(a[0]), Integer.parseInt(b[0])); } });
+        List<String> out = new ArrayList<>();
+        for (String[] item : found) if (!out.contains(item[1])) out.add(item[1]);
+        return out;
     }
 
-    private static final String PAGE = """
-<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>AmbiP TV Source</title><style>
-:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#090b0e;color:#eef;font-family:system-ui,sans-serif}header{padding:18px 20px;border-bottom:1px solid #242830}h1{font-size:20px;margin:0}.wrap{max-width:760px;margin:auto;padding:18px}.card{background:#11151b;border:1px solid #252b35;border-radius:14px;padding:16px;margin-bottom:14px}.row{display:grid;grid-template-columns:1fr 90px;gap:12px;align-items:center;margin:13px 0}input[type=range]{width:100%}.value{font:600 13px ui-monospace,monospace;text-align:right}.badge{display:inline-block;padding:7px 10px;border-radius:20px;background:#493521;font:600 12px ui-monospace,monospace}.stage{position:relative;aspect-ratio:16/9;background:#050608;border-radius:10px;overflow:hidden;margin-top:12px}.tv{position:absolute;left:16%;right:16%;top:18%;bottom:18%;background:#000;z-index:2}.edge{position:absolute;z-index:1;filter:blur(10px)}.top{left:12%;right:12%;top:5%;height:22%}.bottom{left:12%;right:12%;bottom:5%;height:22%}.left{left:4%;top:14%;bottom:14%;width:22%}.right{right:4%;top:14%;bottom:14%;width:22%}.note{color:#9aa3af;font-size:12px;line-height:1.4}</style></head>
-<body><header><h1>AmbiP TV Source <span class="badge" id="state">CONNECTING</span></h1></header><div class="wrap">
-<div class="card"><b>Light stream</b><div class="note" id="meta">—</div><div class="stage"><div id="top" class="edge top"></div><div id="right" class="edge right"></div><div id="bottom" class="edge bottom"></div><div id="left" class="edge left"></div><div class="tv"></div></div><p class="note">Only RGB + luminance + saturation are streamed. No screenshot, JPEG or video leaves the TV.</p></div>
-<div class="card"><b>Capture / stream settings</b>
-<div class="row"><label>Target FPS <input id="fps" type="range" min="5" max="30" step="1"></label><span id="fpsv" class="value"></span></div>
-<div class="row"><label>Edge strip depth <input id="strip" type="range" min="0.03" max="0.25" step="0.01"></label><span id="stripv" class="value"></span></div>
-<div class="row"><label>Temporal smoothing <input id="smooth" type="range" min="0" max="0.95" step="0.01"></label><span id="smoothv" class="value"></span></div>
-<div class="row"><label>Source brightness <input id="brightness" type="range" min="0.40" max="2" step="0.01"></label><span id="brightnessv" class="value"></span></div>
-<div class="row"><label>Source saturation <input id="saturation" type="range" min="0" max="2" step="0.01"></label><span id="saturationv" class="value"></span></div>
-<p class="note">These settings are saved on the TV. The projector can keep its own Color Cloud geometry/dynamics independently.</p></div></div>
-<script>
-const $=x=>document.getElementById(x);let updating=false;
-function grad(samples,vertical=false){if(!samples||!samples.length)return '#000';return `linear-gradient(${vertical?'180deg':'90deg'},${samples.map((x,i)=>`rgb(${x[0]},${x[1]},${x[2]}) ${Math.round(i*100/(samples.length-1||1))}%`).join(',')})`}
-function render(s){$('top').style.background=grad(s.top);$('bottom').style.background=grad(s.bottom);$('left').style.background=grad(s.left,true);$('right').style.background=grad(s.right,true);$('meta').textContent=`${s.fps||0} fps · ${s.w||0}×${s.h||0} · protocol ${s.protocol||'ambip-light-v1'}`}
-async function load(){const r=await fetch('/api/status');const s=await r.json();updating=true;for(const k of ['fps','strip','smoothing','brightness','saturation']){const id=k==='smoothing'?'smooth':k;$(id).value=s[k];$(id+'v').textContent=Number(s[k]).toFixed(k==='fps'?0:2)}updating=false}
-let timer;function changed(){if(updating)return;for(const id of ['fps','strip','smooth','brightness','saturation'])$(id+'v').textContent=Number($(id).value).toFixed(id==='fps'?0:2);clearTimeout(timer);timer=setTimeout(()=>fetch(`/api/settings?fps=${$('fps').value}&strip=${$('strip').value}&smooth=${$('smooth').value}&brightness=${$('brightness').value}&saturation=${$('saturation').value}`),120)}
-for(const id of ['fps','strip','smooth','brightness','saturation'])$(id).addEventListener('input',changed);
-function connect(){const ws=new WebSocket(`ws://${location.host}/ws`);ws.onopen=()=>{$('state').textContent='LIVE';$('state').style.background='#173d2a'};ws.onmessage=e=>{try{render(JSON.parse(e.data))}catch(_){}};ws.onclose=()=>{$('state').textContent='RECONNECTING';$('state').style.background='#493521';setTimeout(connect,1000)};ws.onerror=()=>ws.close()}
-load();connect();</script></body></html>
-""";
+    private static final String PAGE = "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>AmbiP TV Source</title><style>body{background:#0a0c0f;color:#eee;font-family:sans-serif;max-width:680px;margin:auto;padding:22px}.card{background:#15191f;padding:18px;border-radius:12px;margin:14px 0}input{width:100%}.v{float:right;color:#9fd}.ok{color:#8d9}.note{color:#aaa;font-size:13px}</style></head><body><h2>AmbiP TV Source</h2><div class='card'><b id='state'>Checking...</b><p id='meta' class='note'></p><p id='urls' class='note'></p></div><div class='card'><b>TV performance</b><p>Target FPS <span id='fv' class='v'></span><input id='fps' type='range' min='4' max='20'></p><p>Edge depth <span id='sv' class='v'></span><input id='strip' type='range' min='.03' max='.20' step='.01'></p><p>Samples per zone <span id='pv' class='v'></span><input id='samples' type='range' min='1' max='6'></p><p class='note'>For Android Oreo TVs: 8 fps and 2 samples/zone is the ECO default. Color shaping and smoothing run on the projector.</p></div><script>const g=x=>document.getElementById(x);function labels(){g('fv').textContent=g('fps').value;g('sv').textContent=Number(g('strip').value).toFixed(2);g('pv').textContent=g('samples').value}let t;function save(){labels();clearTimeout(t);t=setTimeout(function(){fetch('/api/settings?fps='+g('fps').value+'&strip='+g('strip').value+'&samples='+g('samples').value)},180)}async function load(){let s=await(await fetch('/api/status')).json();g('state').textContent=s.active?'LIVE':'IDLE';g('state').className=s.active?'ok':'';g('meta').textContent=s.status+' | '+s.analysisW+'x'+s.analysisH+' analysis | '+s.clients+' client(s)';g('urls').textContent=s.urls;g('fps').value=s.fps;g('strip').value=s.strip;g('samples').value=s.samples;labels()}['fps','strip','samples'].forEach(function(x){g(x).oninput=save});load();setInterval(load,2000)</script></body></html>";
 }
