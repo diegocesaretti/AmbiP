@@ -27,8 +27,9 @@ import androidx.annotation.Nullable;
 import java.nio.ByteBuffer;
 
 /**
- * Very small Android TV capture worker. The TV only downsamples the display and extracts packed RGB
- * edge samples. Temporal/color/energy processing happens on the projector.
+ * Minimal Android TV capture worker. The TV downsamples to ~128x72, sparsely samples RGB at the
+ * edges and immediately writes one compact binary packet. All smoothing/interpolation/rendering is
+ * projector-side.
  */
 public final class TvCaptureService extends Service {
     public static final String ACTION_START = "com.bwa3d.ambip.tvsource.START";
@@ -74,10 +75,7 @@ public final class TvCaptureService extends Service {
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent == null) return START_NOT_STICKY;
-        if (ACTION_STOP.equals(intent.getAction())) {
-            stopSelf();
-            return START_NOT_STICKY;
-        }
+        if (ACTION_STOP.equals(intent.getAction())) { stopSelf(); return START_NOT_STICKY; }
         if (!ACTION_START.equals(intent.getAction())) return START_NOT_STICKY;
 
         startForeground(NOTIFICATION_ID, buildNotification("Starting light capture…"));
@@ -93,9 +91,8 @@ public final class TvCaptureService extends Service {
             return START_NOT_STICKY;
         }
 
-        try {
-            startCapture(resultCode, resultData);
-        } catch (Throwable t) {
+        try { startCapture(resultCode, resultData); }
+        catch (Throwable t) {
             Log.e(TAG, "startCapture", t);
             SourceHub.setActive(false, "Capture error: " + t.getClass().getSimpleName());
             stopSelf();
@@ -104,7 +101,8 @@ public final class TvCaptureService extends Service {
     }
 
     private void startCapture(int resultCode, Intent resultData) throws Exception {
-        captureThread = new HandlerThread("AmbiPTvLightCapture", Process.THREAD_PRIORITY_BACKGROUND);
+        // Slightly favorable scheduling keeps capture-to-network latency down. The actual work is tiny.
+        captureThread = new HandlerThread("AmbiPTvLightCapture", Process.THREAD_PRIORITY_DEFAULT - 1);
         captureThread.start();
         captureHandler = new Handler(captureThread.getLooper());
 
@@ -133,17 +131,13 @@ public final class TvCaptureService extends Service {
         mediaProjection.registerCallback(projectionCallback, captureHandler);
 
         virtualDisplay = mediaProjection.createVirtualDisplay(
-                "AmbiP TV Light Source",
-                captureWidth,
-                captureHeight,
+                "AmbiP TV Light Source", captureWidth, captureHeight,
                 Math.max(120, Math.min(dm.densityDpi, 240)),
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                imageReader.getSurface(),
-                null,
-                captureHandler);
+                imageReader.getSurface(), null, captureHandler);
 
         fpsWindowStart = SystemClock.elapsedRealtime();
-        SourceHub.setActive(true, "LIVE · ECO capture");
+        SourceHub.setActive(true, "LIVE · binary low-latency");
         ((NotificationManager)getSystemService(NOTIFICATION_SERVICE)).notify(
                 NOTIFICATION_ID, buildNotification("Light data · " + url));
         Log.i(TAG, "TV source started " + captureWidth + "x" + captureHeight + " · " + url);
@@ -152,6 +146,7 @@ public final class TvCaptureService extends Service {
     private void onImageAvailable(ImageReader reader) {
         Image image = null;
         try {
+            // Always discard queued stale frames and process only the newest one.
             image = reader.acquireLatestImage();
             if (image == null) return;
             long now = SystemClock.elapsedRealtime();
@@ -178,8 +173,8 @@ public final class TvCaptureService extends Service {
                 fpsWindowStart = now;
             }
 
-            String json = SourceHub.publish(top, right, bottom, left, fps, captureWidth, captureHeight);
-            if (webServer != null) webServer.broadcast(json);
+            byte[] packet = SourceHub.publishBinary(top, right, bottom, left, fps, captureWidth, captureHeight);
+            if (webServer != null) webServer.broadcast(packet);
         } catch (Throwable t) {
             Log.w(TAG, "frame", t);
         } finally {
@@ -211,8 +206,7 @@ public final class TvCaptureService extends Service {
 
     private static int averageVerticalSamples(ByteBuffer src, int ps, int rs, int w, int h,
                                               int x, int y0, int y1, int count) {
-        long r=0,g=0,b=0,n=0;
-        int limit=src.limit();
+        long r=0,g=0,b=0,n=0; int limit=src.limit();
         for(int i=0;i<count;i++){
             int y = y0 + Math.round((y1-y0-1) * ((i+0.5f)/count));
             int p = clamp(y,0,h-1)*rs + clamp(x,0,w-1)*ps;
@@ -224,8 +218,7 @@ public final class TvCaptureService extends Service {
 
     private static int averageHorizontalSamples(ByteBuffer src, int ps, int rs, int w, int h,
                                                 int x0, int x1, int y, int count) {
-        long r=0,g=0,b=0,n=0;
-        int limit=src.limit();
+        long r=0,g=0,b=0,n=0; int limit=src.limit();
         for(int i=0;i<count;i++){
             int x = x0 + Math.round((x1-x0-1) * ((i+0.5f)/count));
             int p = clamp(y,0,h-1)*rs + clamp(x,0,w-1)*ps;
@@ -245,10 +238,7 @@ public final class TvCaptureService extends Service {
                 ? new Notification.Builder(this, CHANNEL_ID) : new Notification.Builder(this);
         return b.setSmallIcon(android.R.drawable.ic_menu_view)
                 .setContentTitle("AmbiP TV Source")
-                .setContentText(text)
-                .setOngoing(true)
-                .setCategory(Notification.CATEGORY_SERVICE)
-                .build();
+                .setContentText(text).setOngoing(true).setCategory(Notification.CATEGORY_SERVICE).build();
     }
 
     private void createNotificationChannel() {
