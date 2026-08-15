@@ -6,6 +6,7 @@ import android.app.NotificationManager;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
+import android.graphics.Bitmap;
 import android.graphics.PixelFormat;
 import android.hardware.display.DisplayManager;
 import android.hardware.display.VirtualDisplay;
@@ -24,12 +25,13 @@ import android.util.Log;
 
 import androidx.annotation.Nullable;
 
+import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
 
 /**
  * Minimal Android TV capture worker. The TV downsamples to ~128x72, sparsely samples RGB at the
  * edges and immediately writes one compact binary packet. All smoothing/interpolation/rendering is
- * projector-side.
+ * projector-side. Full-frame JPEG encoding happens only for explicit API snapshot requests.
  */
 public final class TvCaptureService extends Service {
     public static final String ACTION_START = "com.bwa3d.ambip.tvsource.START";
@@ -101,7 +103,7 @@ public final class TvCaptureService extends Service {
     }
 
     private void startCapture(int resultCode, Intent resultData) throws Exception {
-        // Slightly favorable scheduling keeps capture-to-network latency down. The actual work is tiny.
+        // Slightly favorable scheduling keeps capture-to-network latency down. The actual hot-path work is tiny.
         captureThread = new HandlerThread("AmbiPTvLightCapture", Process.THREAD_PRIORITY_DEFAULT - 1);
         captureThread.start();
         captureHandler = new Handler(captureThread.getLooper());
@@ -174,12 +176,40 @@ public final class TvCaptureService extends Service {
             }
 
             byte[] packet = SourceHub.publishBinary(top, right, bottom, left, fps, captureWidth, captureHeight);
-            if (webServer != null) webServer.broadcast(packet);
+            if (webServer != null) {
+                webServer.broadcast(packet);
+                webServer.maybePushCapture(now);
+            }
+
+            // The expensive full-frame walk + JPEG encode is never part of normal streaming.
+            if (SourceHub.consumeSnapshotRequest()) {
+                byte[] jpeg = encodeSnapshotJpeg(buffer,pixelStride,rowStride,captureWidth,captureHeight);
+                SourceHub.publishSnapshot(jpeg);
+            }
         } catch (Throwable t) {
             Log.w(TAG, "frame", t);
         } finally {
             if (image != null) image.close();
         }
+    }
+
+    private static byte[] encodeSnapshotJpeg(ByteBuffer src,int ps,int rs,int w,int h){
+        int[] pixels=new int[w*h];int limit=src.limit();
+        for(int y=0;y<h;y++){
+            int row=y*rs;
+            for(int x=0;x<w;x++){
+                int p=row+x*ps;
+                if(p+2>=limit){pixels[y*w+x]=0xff000000;continue;}
+                int r=src.get(p)&255,g=src.get(p+1)&255,b=src.get(p+2)&255;
+                pixels[y*w+x]=0xff000000|(r<<16)|(g<<8)|b;
+            }
+        }
+        Bitmap bitmap=Bitmap.createBitmap(w,h,Bitmap.Config.ARGB_8888);
+        bitmap.setPixels(pixels,0,w,0,0,w,h);
+        ByteArrayOutputStream out=new ByteArrayOutputStream(Math.max(2048,w*h));
+        bitmap.compress(Bitmap.CompressFormat.JPEG,76,out);
+        bitmap.recycle();
+        return out.toByteArray();
     }
 
     private static void sampleEdgesSparse(ByteBuffer src, int pixelStride, int rowStride, int w, int h,
