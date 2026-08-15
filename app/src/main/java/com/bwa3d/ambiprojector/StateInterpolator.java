@@ -1,55 +1,53 @@
 package com.bwa3d.ambiprojector;
 
-import android.os.Handler;
-import android.os.Looper;
 import android.os.SystemClock;
+import android.view.Choreographer;
 
 /**
- * Cheap RGB-only temporal interpolation for the projector. It never waits for a future frame:
- * each newly received state becomes the target and the currently displayed state is used as the
- * start point. This makes an 8-12 fps source look smooth at display refresh rate without adding a
- * full source-frame of latency.
+ * VSYNC-driven RGB interpolation for the projector.
+ *
+ * It never buffers a future source frame. Every packet immediately becomes the new target and the
+ * current visible state becomes the new start state. Rendering is scheduled by Choreographer so
+ * updates land on the next physical display frame instead of a Handler timer. Large scene changes
+ * intentionally get a very short catch-up time.
  */
-public final class StateInterpolator {
+public final class StateInterpolator implements Choreographer.FrameCallback {
     public interface Listener { void onInterpolated(AmbilightState state); }
 
-    private final Handler main = new Handler(Looper.getMainLooper());
     private final Listener listener;
+    private final Choreographer choreographer;
     private AmbilightState displayed = AmbilightState.black();
     private AmbilightState start = displayed;
     private AmbilightState target = displayed;
     private long startAt;
     private long lastTargetAt;
-    private long sourceIntervalMs = 125L;
+    private long sourceIntervalMs = 100L;
+    private long lastRenderNs;
     private boolean running;
     private boolean enabled = true;
-    private int durationMs = 78;
-    private float adaptive = 0.72f;
+    private int durationMs = 46;
+    private float adaptive = 0.88f;
     private int renderHz = 60;
 
-    private final Runnable tick = new Runnable() {
-        @Override public void run() {
-            if (!running) return;
-            renderNow();
-            main.postDelayed(this, Math.max(8L, Math.round(1000f / Math.max(30, renderHz))));
-        }
-    };
-
-    public StateInterpolator(Listener listener) { this.listener = listener; }
+    public StateInterpolator(Listener listener) {
+        this.listener = listener;
+        this.choreographer = Choreographer.getInstance();
+    }
 
     public void start() {
         if (running) return;
         running = true;
-        main.post(tick);
+        lastRenderNs = 0L;
+        choreographer.postFrameCallback(this);
     }
 
     public void stop() {
         running = false;
-        main.removeCallbacks(tick);
+        choreographer.removeFrameCallback(this);
     }
 
     public void setEnabled(boolean value) { enabled = value; }
-    public void setDurationMs(int value) { durationMs = clamp(value, 0, 180); }
+    public void setDurationMs(int value) { durationMs = clamp(value, 0, 140); }
     public void setAdaptive(float value) { adaptive = clamp(value, 0f, 1f); }
     public void setRenderHz(int value) { renderHz = clamp(value, 30, 120); }
 
@@ -57,12 +55,13 @@ public final class StateInterpolator {
         if (next == null) return;
         long now = SystemClock.uptimeMillis();
         if (lastTargetAt > 0) {
-            long measured = clamp(now - lastTargetAt, 20L, 500L);
-            sourceIntervalMs = Math.round(sourceIntervalMs * 0.70f + measured * 0.30f);
+            long measured = clamp(now - lastTargetAt, 16L, 500L);
+            // Follow changing source FPS quickly without reacting to one odd frame.
+            sourceIntervalMs = Math.round(sourceIntervalMs * 0.55f + measured * 0.45f);
         }
         lastTargetAt = now;
 
-        // Start from what is actually visible now, not from the previous network packet.
+        // Never queue. Start from exactly what should be visible at this instant.
         displayed = current(now);
         start = displayed;
         target = next;
@@ -74,25 +73,38 @@ public final class StateInterpolator {
         }
     }
 
-    private void renderNow() {
-        long now = SystemClock.uptimeMillis();
-        AmbilightState s = current(now);
-        displayed = s;
-        emit(s);
+    @Override public void doFrame(long frameTimeNanos) {
+        if (!running) return;
+        long minNs = 1_000_000_000L / Math.max(30, renderHz);
+        if (lastRenderNs == 0L || frameTimeNanos - lastRenderNs >= minNs - 750_000L) {
+            lastRenderNs = frameTimeNanos;
+            long now = SystemClock.uptimeMillis();
+            AmbilightState s = current(now);
+            displayed = s;
+            emit(s);
+        }
+        choreographer.postFrameCallback(this);
     }
 
     private AmbilightState current(long now) {
         if (!enabled || target == null || start == null || durationMs <= 0) return target;
-        int base = Math.min(durationMs, Math.max(12, Math.round(sourceIntervalMs * 0.82f)));
+
+        // Never spend most of a source-frame chasing an already old target.
+        int sourceBound = Math.max(14, Math.round(sourceIntervalMs * 0.52f));
+        int base = Math.min(durationMs, sourceBound);
         float change = difference(start, target);
-        // Big flashes/explosions should hit quickly instead of being turned into a slow fade.
-        float fastFactor = 1f - adaptive * clamp((change - 0.18f) / 0.62f, 0f, 0.82f);
+
+        // Large changes get close to one-display-frame response. Small changes retain fluidity.
+        float urgency = clamp((change - 0.055f) / 0.46f, 0f, 1f);
+        float fastFactor = 1f - adaptive * 0.78f * urgency;
         int effective = Math.max(10, Math.round(base * fastFactor));
         float t = clamp((now - startAt) / (float)effective, 0f, 1f);
-        // Smoothstep has zero slope at the endpoints but still reacts immediately.
-        float st = t * t * (3f - 2f * t);
         if (t >= 1f) return target;
-        return blend(start, target, st);
+
+        // Fast-start ease-out: unlike smoothstep it does not have a zero slope at t=0.
+        float u = 1f - t;
+        float eased = 1f - u * u;
+        return blend(start, target, eased);
     }
 
     private void emit(AmbilightState state) {
@@ -123,10 +135,10 @@ public final class StateInterpolator {
 
     private static float difference(AmbilightState a,AmbilightState b) {
         float sum=0f; int n=0;
-        sum+=difference(a.top,b.top); n+=a.top.length;
-        sum+=difference(a.bottom,b.bottom); n+=a.bottom.length;
-        sum+=difference(a.left,b.left); n+=a.left.length;
-        sum+=difference(a.right,b.right); n+=a.right.length;
+        sum+=difference(a.top,b.top); n+=Math.min(a.top.length,b.top.length);
+        sum+=difference(a.bottom,b.bottom); n+=Math.min(a.bottom.length,b.bottom.length);
+        sum+=difference(a.left,b.left); n+=Math.min(a.left.length,b.left.length);
+        sum+=difference(a.right,b.right); n+=Math.min(a.right.length,b.right.length);
         return n==0?0f:sum/n;
     }
 
