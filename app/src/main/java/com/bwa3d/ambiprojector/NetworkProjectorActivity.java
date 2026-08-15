@@ -139,6 +139,7 @@ public final class NetworkProjectorActivity extends ComponentActivity {
 
     private void toggleCalibration() {
         calibrationVisible = !calibrationVisible;
+        prefs.edit().putBoolean("calibrationOverlay",calibrationVisible).apply();
         ambilightView.setDebug(calibrationVisible);
         if (calibrationVisible) {
             panelVisible = true;
@@ -179,6 +180,8 @@ public final class NetworkProjectorActivity extends ComponentActivity {
         ambilightView.setKeystoneCorners(loadKeystone());
         ambilightView.setTvRect(loadTvRect());
         ambilightView.setTextFrames(loadTextFrames());
+        calibrationVisible=prefs.getBoolean("calibrationOverlay",calibrationVisible);
+        ambilightView.setDebug(calibrationVisible);
     }
 
     private float[] loadKeystone(){float[] d={0f,0f,1f,0f,1f,1f,0f,1f},c=new float[8];for(int i=0;i<8;i++)c[i]=prefs.getFloat("keystone"+i,d[i]);return c;}
