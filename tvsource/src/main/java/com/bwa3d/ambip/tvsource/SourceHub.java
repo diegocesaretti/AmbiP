@@ -14,7 +14,7 @@ public final class SourceHub {
     public static final int V_SEGMENTS = 18;
     public static final int WEB_PORT = 8080;
     private static final String PREFS = "ambip_tv_source";
-    private static final int CONFIG_VERSION = 2;
+    private static final int CONFIG_VERSION = 3;
 
     private static volatile boolean active;
     private static volatile String status = "Idle";
@@ -30,23 +30,29 @@ public final class SourceHub {
     public static volatile int targetFps = 8;
     public static volatile float stripRatio = 0.08f;
     public static volatile int samplesPerZone = 2;
+    public static volatile boolean autoStartOnBoot = false;
 
     public static void load(Context context) {
         SharedPreferences p = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
-        if (p.getInt("configVersion", 0) < CONFIG_VERSION) {
+        int version = p.getInt("configVersion", 0);
+        if (version < 2) {
             targetFps = 8;
             stripRatio = 0.08f;
             samplesPerZone = 2;
+            autoStartOnBoot = false;
             p.edit().putInt("configVersion", CONFIG_VERSION)
                     .putInt("targetFps", targetFps)
                     .putFloat("stripRatio", stripRatio)
                     .putInt("samplesPerZone", samplesPerZone)
+                    .putBoolean("autoStartOnBoot", false)
                     .remove("smoothing").remove("brightness").remove("saturation").apply();
             return;
         }
-        targetFps = clamp(p.getInt("targetFps", 8), 4, 20);
+        targetFps = clamp(p.getInt("targetFps", 8), 4, 30);
         stripRatio = clamp(p.getFloat("stripRatio", 0.08f), 0.03f, 0.20f);
         samplesPerZone = clamp(p.getInt("samplesPerZone", 2), 1, 6);
+        autoStartOnBoot = p.getBoolean("autoStartOnBoot", false);
+        if (version < CONFIG_VERSION) p.edit().putInt("configVersion", CONFIG_VERSION).putBoolean("autoStartOnBoot", autoStartOnBoot).apply();
     }
 
     public static void save(Context context) {
@@ -55,13 +61,15 @@ public final class SourceHub {
                 .putInt("targetFps", targetFps)
                 .putFloat("stripRatio", stripRatio)
                 .putInt("samplesPerZone", samplesPerZone)
+                .putBoolean("autoStartOnBoot", autoStartOnBoot)
                 .apply();
     }
 
-    public static void applySettings(Context context, Integer fpsValue, Float strip, Integer samples) {
-        if (fpsValue != null) targetFps = clamp(fpsValue, 4, 20);
+    public static void applySettings(Context context, Integer fpsValue, Float strip, Integer samples, Boolean autostart) {
+        if (fpsValue != null) targetFps = clamp(fpsValue, 4, 30);
         if (strip != null) stripRatio = clamp(strip, 0.03f, 0.20f);
         if (samples != null) samplesPerZone = clamp(samples, 1, 6);
+        if (autostart != null) autoStartOnBoot = autostart;
         save(context);
     }
 
@@ -110,9 +118,9 @@ public final class SourceHub {
 
     public static String settingsJson() {
         return String.format(Locale.US,
-                "{\"active\":%s,\"status\":\"%s\",\"url\":\"%s\",\"urls\":\"%s\",\"clients\":%d,\"fps\":%d,\"strip\":%.3f,\"samples\":%d,\"analysisW\":%d,\"analysisH\":%d}",
+                "{\"active\":%s,\"status\":\"%s\",\"url\":\"%s\",\"urls\":\"%s\",\"clients\":%d,\"fps\":%d,\"strip\":%.3f,\"samples\":%d,\"autostart\":%s,\"analysisW\":%d,\"analysisH\":%d}",
                 active ? "true" : "false", escape(status), escape(webUrl), escape(webUrls), clients,
-                targetFps, stripRatio, samplesPerZone, width, height);
+                targetFps, stripRatio, samplesPerZone, autoStartOnBoot ? "true" : "false", width, height);
     }
 
     private static void appendPacked(StringBuilder sb, String name, int[] colors) {
