@@ -14,6 +14,7 @@ public final class SourceHub {
     public static final int V_SEGMENTS = 18;
     public static final int WEB_PORT = 8080;
     private static final String PREFS = "ambip_tv_source";
+    private static final int CONFIG_VERSION = 2;
 
     private static volatile boolean active;
     private static volatile String status = "Idle";
@@ -26,13 +27,23 @@ public final class SourceHub {
     private static volatile int clients;
     private static final AtomicLong sequence = new AtomicLong();
 
-    // Deliberately conservative defaults for old Android TV hardware such as Oreo devices.
     public static volatile int targetFps = 8;
     public static volatile float stripRatio = 0.08f;
     public static volatile int samplesPerZone = 2;
 
     public static void load(Context context) {
         SharedPreferences p = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        if (p.getInt("configVersion", 0) < CONFIG_VERSION) {
+            targetFps = 8;
+            stripRatio = 0.08f;
+            samplesPerZone = 2;
+            p.edit().putInt("configVersion", CONFIG_VERSION)
+                    .putInt("targetFps", targetFps)
+                    .putFloat("stripRatio", stripRatio)
+                    .putInt("samplesPerZone", samplesPerZone)
+                    .remove("smoothing").remove("brightness").remove("saturation").apply();
+            return;
+        }
         targetFps = clamp(p.getInt("targetFps", 8), 4, 20);
         stripRatio = clamp(p.getFloat("stripRatio", 0.08f), 0.03f, 0.20f);
         samplesPerZone = clamp(p.getInt("samplesPerZone", 2), 1, 6);
@@ -40,6 +51,7 @@ public final class SourceHub {
 
     public static void save(Context context) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                .putInt("configVersion", CONFIG_VERSION)
                 .putInt("targetFps", targetFps)
                 .putFloat("stripRatio", stripRatio)
                 .putInt("samplesPerZone", samplesPerZone)
@@ -74,10 +86,6 @@ public final class SourceHub {
         if (all != null && !all.isEmpty()) webUrls = all;
     }
 
-    /**
-     * ambip-light-v2 carries only packed RGB24 integers. The projector performs smoothing,
-     * saturation/brightness shaping and energy calculations. This keeps the TV source cheap.
-     */
     public static String publish(int[] top, int[] right, int[] bottom, int[] left,
                                  float captureFps, int sourceWidth, int sourceHeight) {
         fps = captureFps;
