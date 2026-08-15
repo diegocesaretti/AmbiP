@@ -55,6 +55,15 @@ public final class AmbilightView extends View {
     private float cornerBlend=0.82f;
     private float cornerRadius=1.48f;
 
+    // v0.14 dynamic response. Bright/saturated areas become larger and longer than dim/desaturated ones.
+    private float cloudDynamicAmount=0.85f;
+    private float cloudDynamicRadius=0.65f;
+    private float cloudDynamicStretch=0.85f;
+    private float cloudDynamicOpacity=0.18f;
+    private float cloudEnergyGamma=1.15f;
+    private float cloudSaturationWeight=0.60f;
+    private float cloudLumaWeight=0.40f;
+
     private Bitmap projectionBuffer;
     private Canvas projectionCanvas;
 
@@ -86,6 +95,13 @@ public final class AmbilightView extends View {
     public void setCloudSoftness(float value){cloudSoftness=clamp(value,0f,1f);invalidate();}
     public void setCornerBlend(float value){cornerBlend=clamp(value,0f,1f);invalidate();}
     public void setCornerRadius(float value){cornerRadius=clamp(value,0.70f,2.40f);invalidate();}
+    public void setCloudDynamicAmount(float value){cloudDynamicAmount=clamp(value,0f,1.50f);invalidate();}
+    public void setCloudDynamicRadius(float value){cloudDynamicRadius=clamp(value,0f,1.50f);invalidate();}
+    public void setCloudDynamicStretch(float value){cloudDynamicStretch=clamp(value,0f,2.00f);invalidate();}
+    public void setCloudDynamicOpacity(float value){cloudDynamicOpacity=clamp(value,0f,0.80f);invalidate();}
+    public void setCloudEnergyGamma(float value){cloudEnergyGamma=clamp(value,0.40f,2.50f);invalidate();}
+    public void setCloudSaturationWeight(float value){cloudSaturationWeight=clamp(value,0f,1f);invalidate();}
+    public void setCloudLumaWeight(float value){cloudLumaWeight=clamp(value,0f,1f);invalidate();}
     public void setKeystoneCorners(float[] c){if(c==null||c.length!=8)return;float[] n=c.clone();for(int i=0;i<8;i++)n[i]=clamp(n[i],0f,1f);keystoneCorners=n;invalidate();}
     public float[] getKeystoneCorners(){return keystoneCorners.clone();}
     public void setTvRect(float[] r){if(r==null||r.length!=4)return;tvRect=sanitizeRect(r.clone(),0.08f);invalidate();}
@@ -165,13 +181,19 @@ public final class AmbilightView extends View {
         if(colors==null||colors.length==0)return;
         float available=top?tv.top:getHeight()-tv.bottom;
         float pull=0.82f-0.67f*cloudEdgePull;
-        float cy=top?tv.top-available*pull:tv.bottom+available*pull;
+        float baseCy=top?tv.top-available*pull:tv.bottom+available*pull;
+        float direction=top?-1f:1f;
         for(int i=0;i<count;i++){
             float t=count==1?0.5f:i/(float)(count-1);
             float cx=tv.left+tv.width()*t;
-            int color=boostCloudColor(sampleWindow(colors,t,2));
-            float rr=radius*(0.91f+luminance01(color)*0.16f);
-            drawCloudBlob(c,cx,cy,rr,color,0.82f);
+            int raw=sampleWindow(colors,t,2);
+            int color=boostCloudColor(raw);
+            float energy=cloudEnergy(raw);
+            float rr=radius*dynamicRadiusScale(energy);
+            float stretch=dynamicStretchScale(energy);
+            float cy=baseCy+direction*available*dynamicReachOffset(energy);
+            float strength=0.82f*dynamicOpacityScale(energy);
+            drawCloudBlob(c,cx,cy,rr,color,strength,1f,stretch);
         }
     }
 
@@ -179,13 +201,19 @@ public final class AmbilightView extends View {
         if(colors==null||colors.length==0)return;
         float available=left?tv.left:getWidth()-tv.right;
         float pull=0.82f-0.67f*cloudEdgePull;
-        float cx=left?tv.left-available*pull:tv.right+available*pull;
+        float baseCx=left?tv.left-available*pull:tv.right+available*pull;
+        float direction=left?-1f:1f;
         for(int i=0;i<count;i++){
             float t=count==1?0.5f:i/(float)(count-1);
             float cy=tv.top+tv.height()*t;
-            int color=boostCloudColor(sampleWindow(colors,t,2));
-            float rr=radius*(0.89f+luminance01(color)*0.15f);
-            drawCloudBlob(c,cx,cy,rr,color,0.75f);
+            int raw=sampleWindow(colors,t,2);
+            int color=boostCloudColor(raw);
+            float energy=cloudEnergy(raw);
+            float rr=radius*dynamicRadiusScale(energy);
+            float stretch=dynamicStretchScale(energy);
+            float cx=baseCx+direction*available*dynamicReachOffset(energy);
+            float strength=0.75f*dynamicOpacityScale(energy);
+            drawCloudBlob(c,cx,cy,rr,color,strength,stretch,1f);
         }
     }
 
@@ -207,22 +235,33 @@ public final class AmbilightView extends View {
         float centerY=cornerY+sy*availableY*diagonalPull;
 
         int h=boostCloudColor(horizontalColor),v=boostCloudColor(verticalColor);
-        int mixed=boostCloudColor(mixWeighted(horizontalColor,verticalColor,0.5f));
-        float centralStrength=0.34f+cornerBlend*0.34f;
-        float lobeStrength=0.24f+cornerBlend*0.16f;
+        int mixedRaw=mixWeighted(horizontalColor,verticalColor,0.5f);
+        int mixed=boostCloudColor(mixedRaw);
+        float hEnergy=cloudEnergy(horizontalColor),vEnergy=cloudEnergy(verticalColor);
+        float centerEnergy=clamp(Math.max(hEnergy,vEnergy)*0.65f+(hEnergy+vEnergy)*0.175f,0f,1f);
+        float centralStrength=(0.34f+cornerBlend*0.34f)*dynamicOpacityScale(centerEnergy);
+        float hStrength=(0.24f+cornerBlend*0.16f)*dynamicOpacityScale(hEnergy);
+        float vStrength=(0.24f+cornerBlend*0.16f)*dynamicOpacityScale(vEnergy);
 
-        drawCloudBlob(c,centerX,centerY,radius,mixed,centralStrength);
+        float centerRadius=radius*dynamicRadiusScale(centerEnergy);
+        float centerStretch=1f+(dynamicStretchScale(centerEnergy)-1f)*0.72f;
+        float centerReach=0.5f*(dynamicReachOffset(centerEnergy));
+        centerX+=sx*availableX*centerReach;
+        centerY+=sy*availableY*centerReach;
+        drawCloudBlob(c,centerX,centerY,centerRadius,mixed,centralStrength,centerStretch,centerStretch);
 
         float hx=lerp(cornerX,centerX,0.48f);
         float hy=lerp(sideY,centerY,0.54f);
         float vx=lerp(sideX,centerX,0.54f);
         float vy=lerp(cornerY,centerY,0.48f);
-        drawCloudBlob(c,hx,hy,radius*0.88f,h,lobeStrength);
-        drawCloudBlob(c,vx,vy,radius*0.88f,v,lobeStrength);
+        float hRadius=radius*0.88f*dynamicRadiusScale(hEnergy);
+        float vRadius=radius*0.88f*dynamicRadiusScale(vEnergy);
+        drawCloudBlob(c,hx,hy,hRadius,h,hStrength,1f,dynamicStretchScale(hEnergy));
+        drawCloudBlob(c,vx,vy,vRadius,v,vStrength,dynamicStretchScale(vEnergy),1f);
     }
 
-    private void drawCloudBlob(Canvas c,float cx,float cy,float radius,int color,float strength){
-        int alpha=Math.round(255f*cloudOpacity*strength);
+    private void drawCloudBlob(Canvas c,float cx,float cy,float radius,int color,float strength,float scaleX,float scaleY){
+        int alpha=Math.round(255f*cloudOpacity*clamp(strength,0f,1.45f));
         float s=cloudSoftness;
         float innerPos=lerp(0.44f,0.18f,s);
         float midPos=lerp(0.72f,0.44f,s);
@@ -233,7 +272,46 @@ public final class AmbilightView extends View {
         int faint=withAlpha(color,Math.round(alpha*lerp(0.30f,0.10f,s)));
         float r=Math.max(2f,radius);
         paint.setShader(new RadialGradient(cx,cy,r,new int[]{center,inner,mid,faint,0x00000000},new float[]{0f,innerPos,midPos,faintPos,1f},Shader.TileMode.CLAMP));
+        c.save();
+        c.translate(cx,cy);
+        c.scale(clamp(scaleX,0.30f,4f),clamp(scaleY,0.30f,4f));
+        c.translate(-cx,-cy);
         c.drawCircle(cx,cy,r,paint);
+        c.restore();
+    }
+
+    private float cloudEnergy(int color){
+        float[] hsv=new float[3];Color.colorToHSV(color,hsv);
+        float sat=hsv[1],lum=luminance01(color);
+        float sw=cloudSaturationWeight,lw=cloudLumaWeight;
+        float total=Math.max(0.0001f,sw+lw);
+        float raw=(sat*sw+lum*lw)/total;
+        return (float)Math.pow(clamp(raw,0f,1f),cloudEnergyGamma);
+    }
+
+    private float dynamicRadiusScale(float energy){
+        float amount=cloudDynamicAmount*cloudDynamicRadius;
+        float low=Math.max(0.35f,1f-0.55f*amount);
+        float high=1f+1.00f*amount;
+        return lerp(low,high,clamp(energy,0f,1f));
+    }
+
+    private float dynamicStretchScale(float energy){
+        float amount=cloudDynamicAmount*cloudDynamicStretch;
+        float low=Math.max(0.35f,1f-0.45f*amount);
+        float high=1f+1.35f*amount;
+        return lerp(low,high,clamp(energy,0f,1f));
+    }
+
+    private float dynamicOpacityScale(float energy){
+        float amount=cloudDynamicAmount*cloudDynamicOpacity;
+        return lerp(Math.max(0.55f,1f-0.45f*amount),1f+0.55f*amount,clamp(energy,0f,1f));
+    }
+
+    /** Small center displacement adds extra outward reach without making the cloud detach from the TV edge. */
+    private float dynamicReachOffset(float energy){
+        float centered=clamp(energy,0f,1f)-0.35f;
+        return centered*0.10f*cloudDynamicAmount*cloudDynamicStretch;
     }
 
     private int sampleWindow(int[] src,float t,int halfWindow){
@@ -304,7 +382,7 @@ public final class AmbilightView extends View {
     private boolean alive(Overlay o,long now){if(o.text==null||now>o.until){o.text=null;return false;}return true;}
     private boolean isAnyOverlayAlive(long now){return alive(topOverlay,now)||alive(bottomOverlay,now)||alive(leftOverlay,now)||alive(rightOverlay,now);}
 
-    private void drawDebug(Canvas canvas,RectF tv){paint.setShader(null);paint.setStyle(Paint.Style.STROKE);paint.setStrokeWidth(2f);paint.setColor(0x88FFFFFF);canvas.drawRect(tv,paint);paint.setStyle(Paint.Style.FILL);textPaint.setTextAlign(Paint.Align.LEFT);textPaint.setTextSize(Math.max(15f,getHeight()*0.022f));textPaint.setColor(Color.WHITE);float x=18f,y=28f,line=textPaint.getTextSize()*1.35f;canvas.drawText("Ambi Projector v0.13 · "+(projectionStyle==ProjectionStyle.COLOR_CLOUD?"COLOR CLOUD":"EDGE"),x,y,textPaint);y+=line;canvas.drawText(String.format("Camera: %dx%d   %.1f fps",state.sourceWidth,state.sourceHeight,state.fps),x,y,textPaint);y+=line;canvas.drawText("Tap: settings · Long: camera TV · Layout: projected TV/text",x,y,textPaint);}
+    private void drawDebug(Canvas canvas,RectF tv){paint.setShader(null);paint.setStyle(Paint.Style.STROKE);paint.setStrokeWidth(2f);paint.setColor(0x88FFFFFF);canvas.drawRect(tv,paint);paint.setStyle(Paint.Style.FILL);textPaint.setTextAlign(Paint.Align.LEFT);textPaint.setTextSize(Math.max(15f,getHeight()*0.022f));textPaint.setColor(Color.WHITE);float x=18f,y=28f,line=textPaint.getTextSize()*1.35f;canvas.drawText("Ambi Projector v0.14 · "+(projectionStyle==ProjectionStyle.COLOR_CLOUD?"DYNAMIC CLOUD":"EDGE"),x,y,textPaint);y+=line;canvas.drawText(String.format("Camera: %dx%d   %.1f fps",state.sourceWidth,state.sourceHeight,state.fps),x,y,textPaint);y+=line;canvas.drawText("Tap: settings · Long: camera TV · Layout: projected TV/text",x,y,textPaint);}
 
     private float[] positions(int n){float[] p=new float[n];if(n==1){p[0]=0f;return p;}for(int i=0;i<n;i++)p[i]=i/(float)(n-1);return p;}
     private float lerp(float a,float b,float t){return a+(b-a)*t;}
