@@ -14,6 +14,9 @@ import android.widget.TextView;
 
 import androidx.activity.ComponentActivity;
 
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+
 /** Network-only projector: receives compact TV RGB samples and performs all visual processing here. */
 public final class NetworkProjectorActivity extends ComponentActivity {
     private static final String PREFS = "ambi_projector_settings";
@@ -31,10 +34,16 @@ public final class NetworkProjectorActivity extends ComponentActivity {
     private boolean panelVisible = true;
     private boolean calibrationVisible;
 
+    // Network packets must never become an Android main-thread queue. If rendering is briefly late,
+    // overwrite the pending state and consume only the newest light field on the next UI turn.
+    private final AtomicReference<AmbilightState> pendingState = new AtomicReference<>();
+    private final AtomicBoolean stateDispatchPosted = new AtomicBoolean();
+
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        migrateFastDefaults();
         buildUi();
         applyProjectorSettings();
 
@@ -43,12 +52,7 @@ public final class NetworkProjectorActivity extends ComponentActivity {
         interpolator.start();
 
         client = new LightStreamClient(new LightStreamClient.Listener() {
-            @Override public void onState(AmbilightState state) {
-                runOnUiThread(() -> {
-                    if (interpolator != null) interpolator.push(state);
-                    else ambilightView.setState(state);
-                });
-            }
+            @Override public void onState(AmbilightState state) { queueLatestState(state); }
             @Override public void onStatus(String value, boolean connected) {
                 runOnUiThread(() -> {
                     status.setText(value);
@@ -56,7 +60,7 @@ public final class NetworkProjectorActivity extends ComponentActivity {
                 });
             }
         });
-        client.setSmoothing(prefs.getFloat("networkSmoothing",0.25f));
+        client.setSmoothing(prefs.getFloat("networkSmoothing",0.12f));
 
         String saved = prefs.getString(KEY_SOURCE, "");
         source.setText(saved);
@@ -67,7 +71,7 @@ public final class NetworkProjectorActivity extends ComponentActivity {
                 runOnUiThread(() -> {
                     applyProjectorSettings();
                     applyMotionSettings();
-                    if (client != null) client.setSmoothing(prefs.getFloat("networkSmoothing",0.25f));
+                    if (client != null) client.setSmoothing(prefs.getFloat("networkSmoothing",0.12f));
                 });
             }
             @Override public void onSourceChanged(String value) {
@@ -81,6 +85,34 @@ public final class NetworkProjectorActivity extends ComponentActivity {
         catch (Exception e) { web.setText("Control Center unavailable: " + e.getClass().getSimpleName()); }
     }
 
+    private void migrateFastDefaults() {
+        if (prefs.getBoolean("fastPipelineV20",false)) return;
+        SharedPreferences.Editor e=prefs.edit();
+        float oldSmooth=prefs.getFloat("networkSmoothing",0.25f);
+        int oldMs=prefs.getInt("interpolationMs",46);
+        float oldAdaptive=prefs.getFloat("interpolationAdaptive",0.88f);
+        if(!prefs.contains("networkSmoothing")||Math.abs(oldSmooth-0.25f)<0.002f)e.putFloat("networkSmoothing",0.12f);
+        if(!prefs.contains("interpolationMs")||oldMs==46)e.putInt("interpolationMs",30);
+        if(!prefs.contains("interpolationAdaptive")||Math.abs(oldAdaptive-0.88f)<0.002f)e.putFloat("interpolationAdaptive",0.94f);
+        e.putBoolean("fastPipelineV20",true).apply();
+    }
+
+    private void queueLatestState(AmbilightState next) {
+        if(next==null)return;
+        pendingState.set(next);
+        if(stateDispatchPosted.compareAndSet(false,true)) runOnUiThread(this::drainLatestState);
+    }
+
+    private void drainLatestState() {
+        AmbilightState latest=pendingState.getAndSet(null);
+        if(latest!=null){
+            if(interpolator!=null)interpolator.push(latest);else ambilightView.setState(latest);
+        }
+        stateDispatchPosted.set(false);
+        // A packet may have arrived while we were rendering/pushing. Still post only one UI task.
+        if(pendingState.get()!=null&&stateDispatchPosted.compareAndSet(false,true))runOnUiThread(this::drainLatestState);
+    }
+
     private void buildUi() {
         root = new FrameLayout(this);
         root.setBackgroundColor(Color.BLACK);
@@ -92,7 +124,7 @@ public final class NetworkProjectorActivity extends ComponentActivity {
         panel.setOrientation(LinearLayout.VERTICAL);
         panel.setPadding(dp(18),dp(16),dp(18),dp(18));
         panel.setBackgroundColor(0xdd080a0d);
-        TextView title = text("AmbiP · Projector v0.19",20,Color.WHITE); panel.addView(title);
+        TextView title = text("AmbiP · Projector v0.20",20,Color.WHITE); panel.addView(title);
         TextView help = text("TV Source address. Example: 192.168.1.50",12,0xffaeb7c5);
         help.setPadding(0,dp(6),0,dp(8)); panel.addView(help);
         source = new EditText(this);
@@ -108,7 +140,7 @@ public final class NetworkProjectorActivity extends ComponentActivity {
         buttons.addView(button("BLACK",v->ambilightView.setState(AmbilightState.black())));
         buttons.addView(button("HIDE",v->togglePanel()));
         panel.addView(buttons);
-        TextView note = text("v0.19 uses binary TV packets, adaptive smoothing and VSYNC catch-up. Geometry is calibrated from the phone by dragging the TV and outer projection corners.",12,0xff9aa3af);
+        TextView note = text("v0.20 keeps only the newest network state and renders Color Cloud as a low-resolution filtered light field to reduce GPU load and input lag.",12,0xff9aa3af);
         note.setPadding(0,dp(8),0,0); panel.addView(note);
         FrameLayout.LayoutParams pp = new FrameLayout.LayoutParams(Math.min(dp(600),Math.round(getResources().getDisplayMetrics().widthPixels*0.62f)),-2);
         pp.gravity = Gravity.TOP|Gravity.END; pp.setMargins(dp(12),dp(12),dp(12),dp(12)); root.addView(panel,pp);
@@ -126,8 +158,9 @@ public final class NetworkProjectorActivity extends ComponentActivity {
         if (value.isEmpty()) { status.setText("Enter the TV Source IP/address"); return; }
         prefs.edit().putString(KEY_SOURCE,value).apply();
         status.setText("Connecting…"); status.setTextColor(0xffffb74d);
+        pendingState.set(null);
         if (client != null) {
-            client.setSmoothing(prefs.getFloat("networkSmoothing",0.25f));
+            client.setSmoothing(prefs.getFloat("networkSmoothing",0.12f));
             client.connect(value);
         }
     }
@@ -152,8 +185,8 @@ public final class NetworkProjectorActivity extends ComponentActivity {
     private void applyMotionSettings() {
         if (interpolator == null) return;
         interpolator.setEnabled(prefs.getBoolean("interpolationEnabled",true));
-        interpolator.setDurationMs(prefs.getInt("interpolationMs",46));
-        interpolator.setAdaptive(prefs.getFloat("interpolationAdaptive",0.88f));
+        interpolator.setDurationMs(prefs.getInt("interpolationMs",30));
+        interpolator.setAdaptive(prefs.getFloat("interpolationAdaptive",0.94f));
         interpolator.setRenderHz(prefs.getInt("interpolationHz",60));
     }
 
@@ -176,6 +209,7 @@ public final class NetworkProjectorActivity extends ComponentActivity {
         ambilightView.setCloudEnergyGamma(prefs.getFloat("cloudEnergyGamma",1.15f));
         ambilightView.setCloudSaturationWeight(prefs.getFloat("cloudSaturationWeight",0.60f));
         ambilightView.setCloudLumaWeight(prefs.getFloat("cloudLumaWeight",0.40f));
+        ambilightView.setCloudRenderScale(prefs.getFloat("cloudRenderScale",0.42f));
         ambilightView.setOuterFadeRatio(prefs.getFloat("outerFade",0.16f));
         ambilightView.setKeystoneCorners(loadKeystone());
         ambilightView.setTvRect(loadTvRect());
@@ -192,6 +226,6 @@ public final class NetworkProjectorActivity extends ComponentActivity {
     private TextView text(String s,float size,int color){TextView v=new TextView(this);v.setText(s);v.setTextSize(size);v.setTextColor(color);return v;}
     private int dp(int v){return Math.round(v*getResources().getDisplayMetrics().density);}
 
-    @Override protected void onResume(){super.onResume();applyProjectorSettings();applyMotionSettings();if(client!=null)client.setSmoothing(prefs.getFloat("networkSmoothing",0.25f));}
-    @Override protected void onDestroy(){if(interpolator!=null)interpolator.stop();if(client!=null)client.stop();if(webServer!=null)webServer.stop();super.onDestroy();}
+    @Override protected void onResume(){super.onResume();applyProjectorSettings();applyMotionSettings();if(client!=null)client.setSmoothing(prefs.getFloat("networkSmoothing",0.12f));}
+    @Override protected void onDestroy(){pendingState.set(null);if(interpolator!=null)interpolator.stop();if(client!=null)client.stop();if(webServer!=null)webServer.stop();super.onDestroy();}
 }
