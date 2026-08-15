@@ -33,6 +33,7 @@ public final class LightStreamClient {
     private volatile boolean running;
     private volatile Socket socket;
     private volatile float smoothing = 0.45f;
+    private volatile int generation;
     private String host;
     private int port;
     private int[] prevTop, prevBottom, prevLeft, prevRight;
@@ -46,18 +47,20 @@ public final class LightStreamClient {
         host = e.host;
         port = e.port;
         running = true;
+        int g = ++generation;
         prevTop = prevBottom = prevLeft = prevRight = null;
-        worker.execute(this::connectionLoop);
+        worker.execute(() -> connectionLoop(g));
     }
 
     public synchronized void stop() {
         running = false;
+        generation++;
         stopSocket();
         worker.shutdownNow();
     }
 
-    private void connectionLoop() {
-        while (running) {
+    private void connectionLoop(int g) {
+        while (running && g == generation) {
             try {
                 notifyStatus("Connecting to " + host + ":" + port + "…", false);
                 Socket s = new Socket();
@@ -68,17 +71,20 @@ public final class LightStreamClient {
                 BufferedInputStream in = new BufferedInputStream(s.getInputStream());
                 BufferedOutputStream out = new BufferedOutputStream(s.getOutputStream());
                 websocketHandshake(in, out);
+                if (g != generation) break;
                 notifyStatus("LIVE · " + host + ":" + port, true);
-                readFrames(in, out);
+                readFrames(in, out, g);
             } catch (Throwable t) {
-                if (running) {
+                if (running && g == generation) {
                     Log.d(TAG, "stream reconnect: " + t.getClass().getSimpleName());
                     notifyStatus("Disconnected · retrying", false);
                 }
             } finally {
                 stopSocket();
             }
-            if (running) try { Thread.sleep(1000L); } catch (InterruptedException ignored) { break; }
+            if (running && g == generation) {
+                try { Thread.sleep(1000L); } catch (InterruptedException ignored) { break; }
+            }
         }
     }
 
@@ -97,8 +103,8 @@ public final class LightStreamClient {
         String line; while ((line = readLine(in)) != null && !line.isEmpty()) {}
     }
 
-    private void readFrames(InputStream in, OutputStream out) throws Exception {
-        while (running && socket != null && !socket.isClosed()) {
+    private void readFrames(InputStream in, OutputStream out, int g) throws Exception {
+        while (running && g == generation && socket != null && !socket.isClosed()) {
             int b0 = in.read(); if (b0 < 0) throw new IOException("EOF");
             int b1 = in.read(); if (b1 < 0) throw new IOException("EOF");
             int opcode = b0 & 15;
@@ -146,10 +152,11 @@ public final class LightStreamClient {
         if (listener != null) listener.onState(state);
     }
 
-    private static int[] packedColors(JSONArray a,int required) throws Exception {
+    private static int[] packedColors(JSONArray a,int required) {
         int[] out=new int[required];
+        int last=Math.max(0,a.length()-1);
         for(int i=0;i<required;i++){
-            int n=a.optInt(Math.min(i,Math.max(0,a.length()-1)),0)&0x00ffffff;
+            int n=a.optInt(Math.min(i,last),0)&0x00ffffff;
             out[i]=0xff000000|n;
         }
         return out;
