@@ -14,3 +14,4 @@ dependencyResolutionManagement {
 }
 rootProject.name = "AmbiProjectorPrototype"
 include(":app")
+include(":tvsource")
