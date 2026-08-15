@@ -39,7 +39,7 @@ public final class TvCaptureService extends Service {
     private static final String TAG = "AmbiPTvCapture";
     private static final String CHANNEL_ID = "ambip_tv_source";
     private static final int NOTIFICATION_ID = 4201;
-    private static final int CAPTURE_LONG_SIDE = 160;
+    private static final int CAPTURE_LONG_SIDE = 128;
 
     private MediaProjection mediaProjection;
     private VirtualDisplay virtualDisplay;
@@ -54,7 +54,6 @@ public final class TvCaptureService extends Service {
     private int captureWidth;
     private int captureHeight;
 
-    // Reused arrays: no per-frame color-array allocation.
     private final int[] top = new int[SourceHub.H_SEGMENTS];
     private final int[] bottom = new int[SourceHub.H_SEGMENTS];
     private final int[] left = new int[SourceHub.V_SEGMENTS];
@@ -109,7 +108,6 @@ public final class TvCaptureService extends Service {
         captureThread.start();
         captureHandler = new Handler(captureThread.getLooper());
 
-        // Server is deliberately tiny and binds on all interfaces. It also reports every usable LAN IP.
         webServer = new SourceWebServer(this, SourceHub.WEB_PORT);
         String url = webServer.start();
 
@@ -189,10 +187,6 @@ public final class TvCaptureService extends Service {
         }
     }
 
-    /**
-     * Instead of averaging rectangles, sample only a few points through each border strip.
-     * 100 zones x 3 samples = ~300 pixel reads/frame with the default settings.
-     */
     private static void sampleEdgesSparse(ByteBuffer src, int pixelStride, int rowStride, int w, int h,
                                           int[] top, int[] bottom, int[] left, int[] right, int samples) {
         int stripY = Math.max(2, Math.round(h * SourceHub.stripRatio));
