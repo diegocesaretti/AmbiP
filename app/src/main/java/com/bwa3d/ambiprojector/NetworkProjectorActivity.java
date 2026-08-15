@@ -14,7 +14,7 @@ import android.widget.TextView;
 
 import androidx.activity.ComponentActivity;
 
-/** Projector-side network mode consuming ambip-light-v1 from AmbiP TV Source. */
+/** Network-only projector: receives compact TV RGB samples and performs all visual processing here. */
 public final class NetworkProjectorActivity extends ComponentActivity {
     private static final String PREFS = "ambi_projector_settings";
     private static final String KEY_SOURCE = "networkTvSource";
@@ -22,9 +22,10 @@ public final class NetworkProjectorActivity extends ComponentActivity {
     private FrameLayout root;
     private AmbilightView ambilightView;
     private LinearLayout panel;
-    private TextView status;
+    private TextView status, web;
     private EditText source;
     private LightStreamClient client;
+    private ProjectorWebServer webServer;
     private SharedPreferences prefs;
     private boolean panelVisible = true;
 
@@ -34,6 +35,7 @@ public final class NetworkProjectorActivity extends ComponentActivity {
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         buildUi();
         applyProjectorSettings();
+
         client = new LightStreamClient(new LightStreamClient.Listener() {
             @Override public void onState(AmbilightState state) { runOnUiThread(() -> ambilightView.setState(state)); }
             @Override public void onStatus(String value, boolean connected) {
@@ -43,9 +45,28 @@ public final class NetworkProjectorActivity extends ComponentActivity {
                 });
             }
         });
+        client.setSmoothing(prefs.getFloat("networkSmoothing",0.45f));
+
         String saved = prefs.getString(KEY_SOURCE, "");
         source.setText(saved);
         if (!saved.trim().isEmpty()) connect();
+
+        webServer = new ProjectorWebServer(prefs, new ProjectorWebServer.Listener() {
+            @Override public void onSettingsChanged() {
+                runOnUiThread(() -> {
+                    applyProjectorSettings();
+                    if (client != null) client.setSmoothing(prefs.getFloat("networkSmoothing",0.45f));
+                });
+            }
+            @Override public void onSourceChanged(String value) {
+                runOnUiThread(() -> {
+                    source.setText(value);
+                    if (!value.trim().isEmpty()) connect();
+                });
+            }
+        });
+        try { web.setText("Phone settings: " + webServer.start()); }
+        catch (Exception e) { web.setText("Phone settings server unavailable: " + e.getClass().getSimpleName()); }
     }
 
     private void buildUi() {
@@ -59,23 +80,24 @@ public final class NetworkProjectorActivity extends ComponentActivity {
         panel.setOrientation(LinearLayout.VERTICAL);
         panel.setPadding(dp(18),dp(16),dp(18),dp(18));
         panel.setBackgroundColor(0xdd080a0d);
-        TextView title = text("AmbiP · Network Projector",20,Color.WHITE); panel.addView(title);
-        TextView help = text("TV Source address. Example: 192.168.1.50 or http://192.168.1.50:8080",12,0xffaeb7c5);
+        TextView title = text("AmbiP · Projector v0.16",20,Color.WHITE); panel.addView(title);
+        TextView help = text("TV Source address. Example: 192.168.1.50",12,0xffaeb7c5);
         help.setPadding(0,dp(6),0,dp(8)); panel.addView(help);
         source = new EditText(this);
         source.setTextColor(Color.WHITE); source.setHintTextColor(0xff777f8a); source.setHint("TV IP / address");
         source.setSingleLine(true); source.setImeOptions(EditorInfo.IME_ACTION_GO);
         source.setBackgroundColor(0xff20252c); source.setPadding(dp(10),dp(9),dp(10),dp(9));
         panel.addView(source,new LinearLayout.LayoutParams(-1,-2));
-        status = text("Not connected",13,0xffffb74d); status.setPadding(0,dp(9),0,dp(9)); panel.addView(status);
+        status = text("Not connected",13,0xffffb74d); status.setPadding(0,dp(9),0,dp(4)); panel.addView(status);
+        web = text("Phone settings: starting…",12,0xff81d4fa); web.setPadding(0,0,0,dp(9)); web.setTextIsSelectable(true); panel.addView(web);
         LinearLayout buttons = new LinearLayout(this); buttons.setOrientation(LinearLayout.HORIZONTAL);
         buttons.addView(button("CONNECT",v->connect()));
         buttons.addView(button("BLACK",v->ambilightView.setState(AmbilightState.black())));
         buttons.addView(button("HIDE",v->togglePanel()));
         panel.addView(buttons);
-        TextView note = text("Renderer settings are shared with the normal Ambi Projector app. Configure Color Cloud/Layout/Keystone there; this launcher only changes the input source to TV network data.",12,0xff9aa3af);
+        TextView note = text("The TV sends raw edge RGB only. Temporal smoothing, Color Cloud, dynamics, brightness/saturation and projection rendering now run on this device. Use the phone URL for tuning.",12,0xff9aa3af);
         note.setPadding(0,dp(8),0,0); panel.addView(note);
-        FrameLayout.LayoutParams pp = new FrameLayout.LayoutParams(Math.min(dp(520),Math.round(getResources().getDisplayMetrics().widthPixels*0.55f)),-2);
+        FrameLayout.LayoutParams pp = new FrameLayout.LayoutParams(Math.min(dp(540),Math.round(getResources().getDisplayMetrics().widthPixels*0.58f)),-2);
         pp.gravity = Gravity.TOP|Gravity.END; pp.setMargins(dp(12),dp(12),dp(12),dp(12)); root.addView(panel,pp);
 
         ambilightView.setGestureListener(new AmbilightView.GestureListener() {
@@ -91,7 +113,10 @@ public final class NetworkProjectorActivity extends ComponentActivity {
         if (value.isEmpty()) { status.setText("Enter the TV Source IP/address"); return; }
         prefs.edit().putString(KEY_SOURCE,value).apply();
         status.setText("Connecting…"); status.setTextColor(0xffffb74d);
-        client.connect(value);
+        if (client != null) {
+            client.setSmoothing(prefs.getFloat("networkSmoothing",0.45f));
+            client.connect(value);
+        }
     }
 
     private void togglePanel() {
@@ -132,6 +157,6 @@ public final class NetworkProjectorActivity extends ComponentActivity {
     private TextView text(String s,float size,int color){TextView v=new TextView(this);v.setText(s);v.setTextSize(size);v.setTextColor(color);return v;}
     private int dp(int v){return Math.round(v*getResources().getDisplayMetrics().density);}
 
-    @Override protected void onResume(){super.onResume();applyProjectorSettings();}
-    @Override protected void onDestroy(){if(client!=null)client.stop();super.onDestroy();}
+    @Override protected void onResume(){super.onResume();applyProjectorSettings();if(client!=null)client.setSmoothing(prefs.getFloat("networkSmoothing",0.45f));}
+    @Override protected void onDestroy(){if(client!=null)client.stop();if(webServer!=null)webServer.stop();super.onDestroy();}
 }
