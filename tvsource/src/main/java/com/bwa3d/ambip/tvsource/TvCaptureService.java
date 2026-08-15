@@ -17,6 +17,7 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.IBinder;
+import android.os.Process;
 import android.os.SystemClock;
 import android.util.DisplayMetrics;
 import android.util.Log;
@@ -26,8 +27,8 @@ import androidx.annotation.Nullable;
 import java.nio.ByteBuffer;
 
 /**
- * Android TV source service. Frames are consumed locally and discarded; only ambip-light-v1 data
- * (RGB + luminance + saturation per edge sample) is published to LAN clients.
+ * Very small Android TV capture worker. The TV only downsamples the display and extracts packed RGB
+ * edge samples. Temporal/color/energy processing happens on the projector.
  */
 public final class TvCaptureService extends Service {
     public static final String ACTION_START = "com.bwa3d.ambip.tvsource.START";
@@ -38,6 +39,7 @@ public final class TvCaptureService extends Service {
     private static final String TAG = "AmbiPTvCapture";
     private static final String CHANNEL_ID = "ambip_tv_source";
     private static final int NOTIFICATION_ID = 4201;
+    private static final int CAPTURE_LONG_SIDE = 160;
 
     private MediaProjection mediaProjection;
     private VirtualDisplay virtualDisplay;
@@ -51,7 +53,12 @@ public final class TvCaptureService extends Service {
     private float fps;
     private int captureWidth;
     private int captureHeight;
-    private int[] prevTop, prevRight, prevBottom, prevLeft;
+
+    // Reused arrays: no per-frame color-array allocation.
+    private final int[] top = new int[SourceHub.H_SEGMENTS];
+    private final int[] bottom = new int[SourceHub.H_SEGMENTS];
+    private final int[] left = new int[SourceHub.V_SEGMENTS];
+    private final int[] right = new int[SourceHub.V_SEGMENTS];
 
     private final MediaProjection.Callback projectionCallback = new MediaProjection.Callback() {
         @Override public void onStop() {
@@ -74,7 +81,7 @@ public final class TvCaptureService extends Service {
         }
         if (!ACTION_START.equals(intent.getAction())) return START_NOT_STICKY;
 
-        startForeground(NOTIFICATION_ID, buildNotification("Starting capture…"));
+        startForeground(NOTIFICATION_ID, buildNotification("Starting light capture…"));
         if (mediaProjection != null) return START_NOT_STICKY;
 
         int resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0);
@@ -98,10 +105,11 @@ public final class TvCaptureService extends Service {
     }
 
     private void startCapture(int resultCode, Intent resultData) throws Exception {
-        captureThread = new HandlerThread("AmbiPTvLightCapture");
+        captureThread = new HandlerThread("AmbiPTvLightCapture", Process.THREAD_PRIORITY_BACKGROUND);
         captureThread.start();
         captureHandler = new Handler(captureThread.getLooper());
 
+        // Server is deliberately tiny and binds on all interfaces. It also reports every usable LAN IP.
         webServer = new SourceWebServer(this, SourceHub.WEB_PORT);
         String url = webServer.start();
 
@@ -109,11 +117,11 @@ public final class TvCaptureService extends Service {
         int realW = Math.max(1, dm.widthPixels);
         int realH = Math.max(1, dm.heightPixels);
         if (realW >= realH) {
-            captureWidth = 320;
-            captureHeight = Math.max(120, Math.round(320f * realH / realW));
+            captureWidth = CAPTURE_LONG_SIDE;
+            captureHeight = Math.max(72, Math.round(CAPTURE_LONG_SIDE * realH / (float)realW));
         } else {
-            captureHeight = 320;
-            captureWidth = Math.max(120, Math.round(320f * realW / realH));
+            captureHeight = CAPTURE_LONG_SIDE;
+            captureWidth = Math.max(72, Math.round(CAPTURE_LONG_SIDE * realW / (float)realH));
         }
         captureWidth = even(captureWidth);
         captureHeight = even(captureHeight);
@@ -121,7 +129,7 @@ public final class TvCaptureService extends Service {
         imageReader = ImageReader.newInstance(captureWidth, captureHeight, PixelFormat.RGBA_8888, 2);
         imageReader.setOnImageAvailableListener(this::onImageAvailable, captureHandler);
 
-        MediaProjectionManager manager = (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
+        MediaProjectionManager manager = (MediaProjectionManager)getSystemService(Context.MEDIA_PROJECTION_SERVICE);
         mediaProjection = manager.getMediaProjection(resultCode, resultData);
         if (mediaProjection == null) throw new IllegalStateException("MediaProjection unavailable");
         mediaProjection.registerCallback(projectionCallback, captureHandler);
@@ -130,16 +138,16 @@ public final class TvCaptureService extends Service {
                 "AmbiP TV Light Source",
                 captureWidth,
                 captureHeight,
-                Math.max(160, dm.densityDpi),
+                Math.max(120, Math.min(dm.densityDpi, 240)),
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                 imageReader.getSurface(),
                 null,
                 captureHandler);
 
         fpsWindowStart = SystemClock.elapsedRealtime();
-        SourceHub.setActive(true, "LIVE");
+        SourceHub.setActive(true, "LIVE · ECO capture");
         ((NotificationManager)getSystemService(NOTIFICATION_SERVICE)).notify(
-                NOTIFICATION_ID, buildNotification("Streaming light data · " + url));
+                NOTIFICATION_ID, buildNotification("Light data · " + url));
         Log.i(TAG, "TV source started " + captureWidth + "x" + captureHeight + " · " + url);
     }
 
@@ -161,27 +169,18 @@ public final class TvCaptureService extends Service {
             int rowStride = plane.getRowStride();
             if (pixelStride < 3 || rowStride <= 0) return;
 
-            int[] top = new int[SourceHub.H_SEGMENTS];
-            int[] bottom = new int[SourceHub.H_SEGMENTS];
-            int[] left = new int[SourceHub.V_SEGMENTS];
-            int[] right = new int[SourceHub.V_SEGMENTS];
-            sampleEdges(buffer, pixelStride, rowStride, captureWidth, captureHeight, top, bottom, left, right);
-
-            tune(top); tune(right); tune(bottom); tune(left);
-            prevTop = smooth(top, prevTop, SourceHub.smoothing);
-            prevRight = smooth(right, prevRight, SourceHub.smoothing);
-            prevBottom = smooth(bottom, prevBottom, SourceHub.smoothing);
-            prevLeft = smooth(left, prevLeft, SourceHub.smoothing);
+            sampleEdgesSparse(buffer, pixelStride, rowStride, captureWidth, captureHeight,
+                    top, bottom, left, right, SourceHub.samplesPerZone);
 
             fpsWindowFrames++;
             long elapsed = now - fpsWindowStart;
-            if (elapsed >= 900L) {
+            if (elapsed >= 1000L) {
                 fps = fpsWindowFrames * 1000f / Math.max(1L, elapsed);
                 fpsWindowFrames = 0;
                 fpsWindowStart = now;
             }
 
-            String json = SourceHub.publish(prevTop, prevRight, prevBottom, prevLeft, fps, captureWidth, captureHeight);
+            String json = SourceHub.publish(top, right, bottom, left, fps, captureWidth, captureHeight);
             if (webServer != null) webServer.broadcast(json);
         } catch (Throwable t) {
             Log.w(TAG, "frame", t);
@@ -190,48 +189,66 @@ public final class TvCaptureService extends Service {
         }
     }
 
-    private static void sampleEdges(ByteBuffer src, int pixelStride, int rowStride, int w, int h,
-                                    int[] top, int[] bottom, int[] left, int[] right) {
+    /**
+     * Instead of averaging rectangles, sample only a few points through each border strip.
+     * 100 zones x 3 samples = ~300 pixel reads/frame with the default settings.
+     */
+    private static void sampleEdgesSparse(ByteBuffer src, int pixelStride, int rowStride, int w, int h,
+                                          int[] top, int[] bottom, int[] left, int[] right, int samples) {
         int stripY = Math.max(2, Math.round(h * SourceHub.stripRatio));
         int stripX = Math.max(2, Math.round(w * SourceHub.stripRatio));
-        for (int i=0;i<top.length;i++) {
-            int x0=i*w/top.length, x1=Math.max(x0+1,(i+1)*w/top.length);
-            top[i]=averageRect(src,pixelStride,rowStride,w,h,x0,0,x1,stripY);
-            bottom[i]=averageRect(src,pixelStride,rowStride,w,h,x0,h-stripY,x1,h);
+        int count = Math.max(1, Math.min(6, samples));
+
+        for (int i = 0; i < top.length; i++) {
+            int x0 = i * w / top.length;
+            int x1 = Math.max(x0 + 1, (i + 1) * w / top.length);
+            int x = (x0 + x1 - 1) / 2;
+            top[i] = averageVerticalSamples(src, pixelStride, rowStride, w, h, x, 0, stripY, count);
+            bottom[i] = averageVerticalSamples(src, pixelStride, rowStride, w, h, x, h - stripY, h, count);
         }
-        for (int i=0;i<left.length;i++) {
-            int y0=i*h/left.length, y1=Math.max(y0+1,(i+1)*h/left.length);
-            left[i]=averageRect(src,pixelStride,rowStride,w,h,0,y0,stripX,y1);
-            right[i]=averageRect(src,pixelStride,rowStride,w,h,w-stripX,y0,w,y1);
+        for (int i = 0; i < left.length; i++) {
+            int y0 = i * h / left.length;
+            int y1 = Math.max(y0 + 1, (i + 1) * h / left.length);
+            int y = (y0 + y1 - 1) / 2;
+            left[i] = averageHorizontalSamples(src, pixelStride, rowStride, w, h, 0, stripX, y, count);
+            right[i] = averageHorizontalSamples(src, pixelStride, rowStride, w, h, w - stripX, w, y, count);
         }
     }
 
-    private static int averageRect(ByteBuffer src,int pixelStride,int rowStride,int w,int h,int x0,int y0,int x1,int y1) {
-        x0=clamp(x0,0,w-1); x1=clamp(x1,x0+1,w); y0=clamp(y0,0,h-1); y1=clamp(y1,y0+1,h);
-        long r=0,g=0,b=0,n=0; int stepX=Math.max(1,(x1-x0)/10), stepY=Math.max(1,(y1-y0)/5); int limit=src.limit();
-        for(int y=y0;y<y1;y+=stepY){int row=y*rowStride;for(int x=x0;x<x1;x+=stepX){int p=row+x*pixelStride;if(p+2>=limit)continue;r+=src.get(p)&255;g+=src.get(p+1)&255;b+=src.get(p+2)&255;n++;}}
-        if(n==0)return 0xff000000;
+    private static int averageVerticalSamples(ByteBuffer src, int ps, int rs, int w, int h,
+                                              int x, int y0, int y1, int count) {
+        long r=0,g=0,b=0,n=0;
+        int limit=src.limit();
+        for(int i=0;i<count;i++){
+            int y = y0 + Math.round((y1-y0-1) * ((i+0.5f)/count));
+            int p = clamp(y,0,h-1)*rs + clamp(x,0,w-1)*ps;
+            if(p+2>=limit) continue;
+            r+=src.get(p)&255; g+=src.get(p+1)&255; b+=src.get(p+2)&255; n++;
+        }
+        return pack(r,g,b,n);
+    }
+
+    private static int averageHorizontalSamples(ByteBuffer src, int ps, int rs, int w, int h,
+                                                int x0, int x1, int y, int count) {
+        long r=0,g=0,b=0,n=0;
+        int limit=src.limit();
+        for(int i=0;i<count;i++){
+            int x = x0 + Math.round((x1-x0-1) * ((i+0.5f)/count));
+            int p = clamp(y,0,h-1)*rs + clamp(x,0,w-1)*ps;
+            if(p+2>=limit) continue;
+            r+=src.get(p)&255; g+=src.get(p+1)&255; b+=src.get(p+2)&255; n++;
+        }
+        return pack(r,g,b,n);
+    }
+
+    private static int pack(long r,long g,long b,long n){
+        if(n<=0)return 0xff000000;
         return 0xff000000|(((int)(r/n))<<16)|(((int)(g/n))<<8)|((int)(b/n));
     }
 
-    private static void tune(int[] a) { for (int i=0;i<a.length;i++) a[i]=SourceHub.tuneColor(a[i]); }
-
-    private static int[] smooth(int[] current, int[] previous, float amount) {
-        if (previous == null || previous.length != current.length || amount <= 0f) return current.clone();
-        float old = Math.max(0f, Math.min(0.95f, amount)), fresh = 1f-old;
-        int[] out = new int[current.length];
-        for (int i=0;i<current.length;i++) {
-            int a=previous[i], b=current[i];
-            int r=Math.round(((a>>16)&255)*old+((b>>16)&255)*fresh);
-            int g=Math.round(((a>>8)&255)*old+((b>>8)&255)*fresh);
-            int bl=Math.round((a&255)*old+(b&255)*fresh);
-            out[i]=0xff000000|(r<<16)|(g<<8)|bl;
-        }
-        return out;
-    }
-
     private Notification buildNotification(String text) {
-        Notification.Builder b = Build.VERSION.SDK_INT >= 26 ? new Notification.Builder(this, CHANNEL_ID) : new Notification.Builder(this);
+        Notification.Builder b = Build.VERSION.SDK_INT >= 26
+                ? new Notification.Builder(this, CHANNEL_ID) : new Notification.Builder(this);
         return b.setSmallIcon(android.R.drawable.ic_menu_view)
                 .setContentTitle("AmbiP TV Source")
                 .setContentText(text)
@@ -243,7 +260,7 @@ public final class TvCaptureService extends Service {
     private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT < 26) return;
         NotificationChannel c = new NotificationChannel(CHANNEL_ID, "AmbiP TV light source", NotificationManager.IMPORTANCE_LOW);
-        c.setDescription("Processes TV screen colors locally and streams only light metadata on the LAN");
+        c.setDescription("Low-load TV edge color source");
         ((NotificationManager)getSystemService(NOTIFICATION_SERVICE)).createNotificationChannel(c);
     }
 
@@ -253,7 +270,7 @@ public final class TvCaptureService extends Service {
     @Nullable @Override public IBinder onBind(Intent intent){return null;}
 
     @Override public void onDestroy() {
-        SourceHub.setActive(false, "Stopped — start a new capture session from the TV app");
+        SourceHub.setActive(false, "Stopped — start capture again from the TV app");
         if(imageReader!=null)try{imageReader.setOnImageAvailableListener(null,null);}catch(Throwable ignored){}
         if(virtualDisplay!=null){try{virtualDisplay.release();}catch(Throwable ignored){}virtualDisplay=null;}
         if(mediaProjection!=null){try{mediaProjection.unregisterCallback(projectionCallback);}catch(Throwable ignored){}try{mediaProjection.stop();}catch(Throwable ignored){}mediaProjection=null;}
