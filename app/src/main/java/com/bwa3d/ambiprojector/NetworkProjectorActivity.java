@@ -77,8 +77,8 @@ public final class NetworkProjectorActivity extends ComponentActivity {
                 });
             }
         });
-        try { web.setText("Phone settings: " + webServer.start()); }
-        catch (Exception e) { web.setText("Phone settings server unavailable: " + e.getClass().getSimpleName()); }
+        try { web.setText("AmbiP Control Center: " + webServer.start()); }
+        catch (Exception e) { web.setText("Control Center unavailable: " + e.getClass().getSimpleName()); }
     }
 
     private void buildUi() {
@@ -92,7 +92,7 @@ public final class NetworkProjectorActivity extends ComponentActivity {
         panel.setOrientation(LinearLayout.VERTICAL);
         panel.setPadding(dp(18),dp(16),dp(18),dp(18));
         panel.setBackgroundColor(0xdd080a0d);
-        TextView title = text("AmbiP · Projector v0.17",20,Color.WHITE); panel.addView(title);
+        TextView title = text("AmbiP · Projector v0.18",20,Color.WHITE); panel.addView(title);
         TextView help = text("TV Source address. Example: 192.168.1.50",12,0xffaeb7c5);
         help.setPadding(0,dp(6),0,dp(8)); panel.addView(help);
         source = new EditText(this);
@@ -101,14 +101,14 @@ public final class NetworkProjectorActivity extends ComponentActivity {
         source.setBackgroundColor(0xff20252c); source.setPadding(dp(10),dp(9),dp(10),dp(9));
         panel.addView(source,new LinearLayout.LayoutParams(-1,-2));
         status = text("Not connected",13,0xffffb74d); status.setPadding(0,dp(9),0,dp(4)); panel.addView(status);
-        web = text("Phone settings: starting…",12,0xff81d4fa); web.setPadding(0,0,0,dp(9)); web.setTextIsSelectable(true); panel.addView(web);
+        web = text("AmbiP Control Center: starting…",12,0xff81d4fa); web.setPadding(0,0,0,dp(9)); web.setTextIsSelectable(true); panel.addView(web);
         LinearLayout buttons = new LinearLayout(this); buttons.setOrientation(LinearLayout.HORIZONTAL);
         buttons.addView(button("CONNECT",v->connect()));
         buttons.addView(button("CALIBRATE",v->toggleCalibration()));
         buttons.addView(button("BLACK",v->ambilightView.setState(AmbilightState.black())));
         buttons.addView(button("HIDE",v->togglePanel()));
         panel.addView(buttons);
-        TextView note = text("Interpolation, Color Cloud and geometry run here. CALIBRATE shows the TV mask while you adjust TV borders and outer keystone corners from the phone page.",12,0xff9aa3af);
+        TextView note = text("One phone portal now controls TV Source performance, interpolation, Color Cloud, geometry and context zones. CALIBRATE shows the projector guide while you adjust it.",12,0xff9aa3af);
         note.setPadding(0,dp(8),0,0); panel.addView(note);
         FrameLayout.LayoutParams pp = new FrameLayout.LayoutParams(Math.min(dp(600),Math.round(getResources().getDisplayMetrics().widthPixels*0.62f)),-2);
         pp.gravity = Gravity.TOP|Gravity.END; pp.setMargins(dp(12),dp(12),dp(12),dp(12)); root.addView(panel,pp);
@@ -144,7 +144,7 @@ public final class NetworkProjectorActivity extends ComponentActivity {
         if (calibrationVisible) {
             panelVisible = true;
             panel.setVisibility(View.VISIBLE);
-            status.setText("CALIBRATION · use phone settings / Geometry");
+            status.setText("CALIBRATION · use AmbiP Control Center / Geometry");
             status.setTextColor(0xff81d4fa);
         }
     }
