@@ -142,8 +142,27 @@ public final class MainActivity extends ComponentActivity {
 
         addSection("CAMERA / CAPTURE");addExposureControl();addZoomControl();
         addFloatSlider("Capture contrast",0.45f,2.20f,1f,"captureContrast",v->analyzer.setCaptureContrast(v));addFloatSlider("Capture saturation",0f,2.20f,1f,"captureSaturation",v->analyzer.setCaptureSaturation(v));addBiPolarSlider("Camera color temperature","Warm","Cool","captureColorTemperature",v->analyzer.setCaptureColorTemperature(v));addBiPolarSlider("Camera tint","Green","Magenta","captureTint",v->analyzer.setCaptureTint(v));addFloatSlider("Camera red gain",0.45f,1.75f,1f,"captureRedGain",v->analyzer.setCaptureRedGain(v));addFloatSlider("Camera green gain",0.45f,1.75f,1f,"captureGreenGain",v->analyzer.setCaptureGreenGain(v));addFloatSlider("Camera blue gain",0.45f,1.75f,1f,"captureBlueGain",v->analyzer.setCaptureBlueGain(v));
+
         addSection("AMBIENT PROJECTION");addFloatSlider("Ambient brightness",0.15f,2f,1f,"ambientBrightness",v->analyzer.setAmbientBrightness(v));addFloatSlider("Ambient contrast",0.45f,2.20f,1f,"ambientContrast",v->analyzer.setAmbientContrast(v));addBiPolarSlider("Projector color temperature","Warm","Cool","ambientColorTemperature",v->analyzer.setAmbientColorTemperature(v));addFloatSlider("Motion smoothing",0f,0.96f,0.68f,"smoothing",v->analyzer.setSmoothing(v));addFloatSlider("Outer black fade",0.02f,0.42f,0.16f,"outerFade",v->ambilightView.setOuterFadeRatio(v));
-        TextView info=text("LAYOUT: movable inner TV border + 4 movable/resizable text frames. OUTER: 4 corners and 4 draggable projection edges.",12,0xFFAAAAAA);info.setPadding(0,dp(8),0,0);settingsPanel.addView(info);
+
+        addSection("PROJECTION STYLE");
+        LinearLayout styleRow=new LinearLayout(this);styleRow.setOrientation(LinearLayout.HORIZONTAL);
+        styleRow.addView(makeButton("EDGE GRADIENT",v->{ambilightView.setProjectionStyle(AmbilightView.ProjectionStyle.EDGE_GRADIENT);prefs.edit().putString("projectionStyle","EDGE_GRADIENT").apply();Toast.makeText(this,"Projection: Edge Gradient",Toast.LENGTH_SHORT).show();}));
+        styleRow.addView(makeButton("COLOR CLOUD",v->{ambilightView.setProjectionStyle(AmbilightView.ProjectionStyle.COLOR_CLOUD);prefs.edit().putString("projectionStyle","COLOR_CLOUD").apply();Toast.makeText(this,"Projection: Color Cloud",Toast.LENGTH_SHORT).show();}));
+        settingsPanel.addView(styleRow);
+
+        addSection("COLOR CLOUD / GRADIENT");
+        addFloatSlider("Cloud spread",0.05f,0.90f,0.42f,"cloudSpread",v->ambilightView.setCloudSpread(v));
+        addFloatSlider("Cloud radius",0.08f,0.50f,0.26f,"cloudRadius",v->ambilightView.setCloudRadius(v));
+        addFloatSlider("Cloud opacity",0.05f,1.00f,0.60f,"cloudOpacity",v->ambilightView.setCloudOpacity(v));
+        addFloatSlider("Gradient softness",0.00f,1.00f,0.72f,"cloudSoftness",v->ambilightView.setCloudSoftness(v));
+        addFloatSlider("Corner blend",0.00f,1.00f,0.82f,"cornerBlend",v->ambilightView.setCornerBlend(v));
+        addFloatSlider("Corner radius",0.70f,2.40f,1.48f,"cornerRadius",v->ambilightView.setCornerRadius(v));
+        addFloatSlider("Edge pull",0.00f,1.00f,0.62f,"cloudEdgePull",v->ambilightView.setCloudEdgePull(v));
+        addFloatSlider("Cloud saturation",0.50f,2.50f,1.32f,"cloudSaturation",v->ambilightView.setCloudSaturation(v));
+        addFloatSlider("Cloud brightness",0.40f,1.80f,1.08f,"cloudBrightness",v->ambilightView.setCloudBrightness(v));
+
+        TextView info=text("COLOR CLOUD: radial gradient fields + diagonal corner bridges. LAYOUT: projected TV/text. OUTER: keystone and projection edges.",12,0xFFAAAAAA);info.setPadding(0,dp(8),0,0);settingsPanel.addView(info);
         TextView reset=makeButton("RESET ALL SETTINGS",v->resetSettings());LinearLayout.LayoutParams rp=new LinearLayout.LayoutParams(-1,-2);rp.topMargin=dp(12);reset.setLayoutParams(rp);settingsPanel.addView(reset);
         FrameLayout.LayoutParams sp=new FrameLayout.LayoutParams(Math.min(dp(560),Math.round(getResources().getDisplayMetrics().widthPixels*0.62f)),-1);sp.gravity=Gravity.END;scroll.setVisibility(View.GONE);root.addView(scroll,sp);
     }
@@ -158,11 +177,14 @@ public final class MainActivity extends ComponentActivity {
 
     private void restoreSettings(){
         if(analyzer==null)return;analyzer.setCaptureContrast(prefs.getFloat("captureContrast",1f));analyzer.setCaptureSaturation(prefs.getFloat("captureSaturation",1f));analyzer.setCaptureColorTemperature(prefs.getFloat("captureColorTemperature",0f));analyzer.setCaptureTint(prefs.getFloat("captureTint",0f));analyzer.setCaptureRedGain(prefs.getFloat("captureRedGain",1f));analyzer.setCaptureGreenGain(prefs.getFloat("captureGreenGain",1f));analyzer.setCaptureBlueGain(prefs.getFloat("captureBlueGain",1f));analyzer.setAmbientBrightness(prefs.getFloat("ambientBrightness",1f));analyzer.setAmbientContrast(prefs.getFloat("ambientContrast",1f));analyzer.setAmbientColorTemperature(prefs.getFloat("ambientColorTemperature",0f));analyzer.setSmoothing(prefs.getFloat("smoothing",0.68f));
+        String style=prefs.getString("projectionStyle","COLOR_CLOUD");ambilightView.setProjectionStyle("EDGE_GRADIENT".equals(style)?AmbilightView.ProjectionStyle.EDGE_GRADIENT:AmbilightView.ProjectionStyle.COLOR_CLOUD);
+        ambilightView.setCloudSpread(prefs.getFloat("cloudSpread",0.42f));ambilightView.setCloudRadius(prefs.getFloat("cloudRadius",0.26f));ambilightView.setCloudOpacity(prefs.getFloat("cloudOpacity",0.60f));ambilightView.setCloudSoftness(prefs.getFloat("cloudSoftness",0.72f));ambilightView.setCornerBlend(prefs.getFloat("cornerBlend",0.82f));ambilightView.setCornerRadius(prefs.getFloat("cornerRadius",1.48f));ambilightView.setCloudEdgePull(prefs.getFloat("cloudEdgePull",0.62f));ambilightView.setCloudSaturation(prefs.getFloat("cloudSaturation",1.32f));ambilightView.setCloudBrightness(prefs.getFloat("cloudBrightness",1.08f));
         ambilightView.setOuterFadeRatio(prefs.getFloat("outerFade",0.16f));ambilightView.setKeystoneCorners(loadKeystone());ambilightView.setTvRect(loadTvRect());ambilightView.setTextFrames(loadTextFrames());calibrationZoom=prefs.getFloat("cameraZoom",1.8f);requestedExposureIndex=prefs.getInt("exposureIndex",0);
     }
 
     private void resetSettings(){
         prefs.edit().clear().apply();analyzer.setCaptureContrast(1f);analyzer.setCaptureSaturation(1f);analyzer.setCaptureColorTemperature(0f);analyzer.setCaptureTint(0f);analyzer.setCaptureRedGain(1f);analyzer.setCaptureGreenGain(1f);analyzer.setCaptureBlueGain(1f);analyzer.setAmbientBrightness(1f);analyzer.setAmbientContrast(1f);analyzer.setAmbientColorTemperature(0f);analyzer.setSmoothing(0.68f);ambilightView.setOuterFadeRatio(0.16f);
+        ambilightView.setProjectionStyle(AmbilightView.ProjectionStyle.COLOR_CLOUD);ambilightView.setCloudSpread(0.42f);ambilightView.setCloudRadius(0.26f);ambilightView.setCloudOpacity(0.60f);ambilightView.setCloudSoftness(0.72f);ambilightView.setCornerBlend(0.82f);ambilightView.setCornerRadius(1.48f);ambilightView.setCloudEdgePull(0.62f);ambilightView.setCloudSaturation(1.32f);ambilightView.setCloudBrightness(1.08f);
         float[] k=defaultKeystone(),tv=defaultTvRect();float[][] frames=defaultTextFrames();ambilightView.setKeystoneCorners(k);ambilightView.setTvRect(tv);ambilightView.setTextFrames(frames);projectorKeystoneView.setCorners(k);projectionLayoutView.setTvRect(tv);projectionLayoutView.setTextFrames(frames);calibrationZoom=1.8f;requestedExposureIndex=0;applyZoom(calibrationZoom);applyExposureIndex(0,false);Toast.makeText(this,"Settings reset · reopen panel to refresh sliders",Toast.LENGTH_SHORT).show();
     }
 
@@ -185,10 +207,7 @@ public final class MainActivity extends ComponentActivity {
     private void enterProjectorCalibration(){if(calibrating||layoutCalibrating)return;settingsVisible=false;hideSettings();previewVisible=false;calibrationContainer.setVisibility(View.INVISIBLE);projectorCalibrating=true;projectorKeystoneView.setCorners(ambilightView.getKeystoneCorners());projectorKeystoneView.setVisibility(View.VISIBLE);projectorToolbar.setVisibility(View.VISIBLE);Toast.makeText(this,"OUTER PROJECTION · drag corners or blue edge handles",Toast.LENGTH_LONG).show();}
     private void exitProjectorCalibration(){float[] c=projectorKeystoneView.getCorners();ambilightView.setKeystoneCorners(c);saveKeystone(c);projectorCalibrating=false;projectorKeystoneView.setVisibility(View.GONE);projectorToolbar.setVisibility(View.GONE);Toast.makeText(this,"Outer projection saved",Toast.LENGTH_SHORT).show();}
 
-    private void enterLayoutCalibration(){
-        if(calibrating||projectorCalibrating)return;settingsVisible=false;hideSettings();previewVisible=false;calibrationContainer.setVisibility(View.INVISIBLE);layoutCalibrating=true;
-        projectionLayoutView.setTvRect(ambilightView.getTvRect());projectionLayoutView.setTextFrames(ambilightView.getTextFrames());ambilightView.showContextDemo(600000L);projectionLayoutView.setVisibility(View.VISIBLE);layoutToolbar.setVisibility(View.VISIBLE);Toast.makeText(this,"LAYOUT · TV inner border and text frames are independent",Toast.LENGTH_LONG).show();
-    }
+    private void enterLayoutCalibration(){if(calibrating||projectorCalibrating)return;settingsVisible=false;hideSettings();previewVisible=false;calibrationContainer.setVisibility(View.INVISIBLE);layoutCalibrating=true;projectionLayoutView.setTvRect(ambilightView.getTvRect());projectionLayoutView.setTextFrames(ambilightView.getTextFrames());ambilightView.showContextDemo(600000L);projectionLayoutView.setVisibility(View.VISIBLE);layoutToolbar.setVisibility(View.VISIBLE);Toast.makeText(this,"LAYOUT · TV inner border and text frames are independent",Toast.LENGTH_LONG).show();}
     private void exitLayoutCalibration(){float[] tv=projectionLayoutView.getTvRect();float[][] frames=projectionLayoutView.getTextFrames();ambilightView.setTvRect(tv);ambilightView.setTextFrames(frames);saveProjectionLayout(tv,frames);layoutCalibrating=false;projectionLayoutView.setVisibility(View.GONE);layoutToolbar.setVisibility(View.GONE);Toast.makeText(this,"Projection layout saved",Toast.LENGTH_SHORT).show();}
     private void hideSettings(){View v=root.findViewWithTag("settingsScroll");if(v!=null)v.setVisibility(View.GONE);}
 
