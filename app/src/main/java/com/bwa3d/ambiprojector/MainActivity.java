@@ -5,6 +5,9 @@ import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.SystemClock;
 import android.util.Log;
 import android.util.Range;
 import android.util.Size;
@@ -39,6 +42,7 @@ public final class MainActivity extends ComponentActivity {
     private static final String TAG="AmbiProjector";
     private static final int CAMERA_REQUEST=1001;
     private static final String PREFS="ambi_projector_settings";
+    private static final long CAMERA_STALL_MS=3500L;
 
     private FrameLayout root,calibrationContainer;
     private AmbilightView ambilightView;
@@ -46,15 +50,37 @@ public final class MainActivity extends ComponentActivity {
     private ScreenCalibrationView calibrationView;
     private ProjectorKeystoneView projectorKeystoneView;
     private LinearLayout calibrationToolbar,projectorToolbar,settingsPanel;
-    private TextView exposureLabel,zoomLabel;
+    private TextView exposureLabel,zoomLabel,cameraStatusLabel;
     private SeekBar exposureSeek,zoomSeek;
     private FrameAnalyzer analyzer;
     private ExecutorService cameraExecutor;
     private Camera boundCamera;
+    private ProcessCameraProvider cameraProvider;
     private SharedPreferences prefs;
+    private final Handler mainHandler=new Handler(Looper.getMainLooper());
     private boolean previewVisible=false,calibrating=false,projectorCalibrating=false,settingsVisible=false;
+    private boolean cameraBinding=false,destroyed=false;
     private float calibrationZoom=1.8f;
     private int requestedExposureIndex=0;
+    private long lastFrameAt=0L,lastRestartAt=0L;
+
+    private final Runnable cameraWatchdog=new Runnable(){
+        @Override public void run(){
+            if(destroyed)return;
+            long now=SystemClock.elapsedRealtime();
+            boolean hasPermission=ContextCompat.checkSelfPermission(MainActivity.this,Manifest.permission.CAMERA)==PackageManager.PERMISSION_GRANTED;
+            if(hasPermission&&getLifecycle().getCurrentState().isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)){
+                if(lastFrameAt>0L&&now-lastFrameAt>CAMERA_STALL_MS&&now-lastRestartAt>CAMERA_STALL_MS){
+                    setCameraStatus("STALLED · restarting",0xFFFFB74D);
+                    restartCamera("watchdog");
+                }else if(lastFrameAt==0L&&now-lastRestartAt>CAMERA_STALL_MS*2){
+                    setCameraStatus("NO FRAMES · restarting",0xFFFFB74D);
+                    restartCamera("no first frame");
+                }
+            }
+            mainHandler.postDelayed(this,1500L);
+        }
+    };
 
     @Override protected void onCreate(Bundle state){
         super.onCreate(state);
@@ -62,7 +88,13 @@ public final class MainActivity extends ComponentActivity {
             prefs=getSharedPreferences(PREFS,MODE_PRIVATE);
             cameraExecutor=Executors.newSingleThreadExecutor();
             buildUi();
-            analyzer=new FrameAnalyzer(s->runOnUiThread(()->ambilightView.setState(s)));
+            analyzer=new FrameAnalyzer(s->{
+                lastFrameAt=SystemClock.elapsedRealtime();
+                runOnUiThread(()->{
+                    ambilightView.setState(s);
+                    setCameraStatus(String.format(Locale.US,"LIVE · %.1f fps",s.fps),0xFF81C784);
+                });
+            });
             restoreSettings();
             analyzer.setDetectionListener((corners,confidence)->runOnUiThread(()->{
                 calibrationView.setCorners(corners);
@@ -72,6 +104,7 @@ public final class MainActivity extends ComponentActivity {
             projectorKeystoneView.setListener(c->ambilightView.setKeystoneCorners(c));
             if(ContextCompat.checkSelfPermission(this,Manifest.permission.CAMERA)==PackageManager.PERMISSION_GRANTED)startCameraSafely();
             else ActivityCompat.requestPermissions(this,new String[]{Manifest.permission.CAMERA},CAMERA_REQUEST);
+            mainHandler.postDelayed(cameraWatchdog,2500L);
         }catch(Throwable t){showFatalError("Startup",t);}
     }
 
@@ -86,13 +119,12 @@ public final class MainActivity extends ComponentActivity {
         previewView=new PreviewView(this);previewView.setScaleType(PreviewView.ScaleType.FIT_CENTER);previewView.setImplementationMode(PreviewView.ImplementationMode.COMPATIBLE);
         calibrationContainer.addView(previewView,new FrameLayout.LayoutParams(-1,-1));
         calibrationView=new ScreenCalibrationView(this);calibrationView.setVisibility(View.GONE);calibrationContainer.addView(calibrationView,new FrameLayout.LayoutParams(-1,-1));
-        calibrationContainer.setVisibility(View.GONE);
+        // Keep PreviewView laid out even while hidden. GONE can starve the CameraX preview surface on some phones.
+        calibrationContainer.setVisibility(View.INVISIBLE);
 
         projectorKeystoneView=new ProjectorKeystoneView(this);projectorKeystoneView.setVisibility(View.GONE);root.addView(projectorKeystoneView,new FrameLayout.LayoutParams(-1,-1));
 
-        buildCalibrationToolbar();
-        buildProjectorToolbar();
-        buildSettingsPanel();
+        buildCalibrationToolbar();buildProjectorToolbar();buildSettingsPanel();
         ambilightView.setGestureListener(new AmbilightView.GestureListener(){
             @Override public void onSingleTap(){if(!calibrating&&!projectorCalibrating)toggleSettings();}
             @Override public void onLongPress(){if(!projectorCalibrating)enterCalibration();}
@@ -107,6 +139,7 @@ public final class MainActivity extends ComponentActivity {
         calibrationToolbar.addView(makeButton("AUTO",v->{analyzer.requestAutoDetect();Toast.makeText(this,"Looking for TV borders…",Toast.LENGTH_SHORT).show();}));
         calibrationToolbar.addView(makeButton("ZOOM +",v->changeZoom(0.25f)));
         calibrationToolbar.addView(makeButton("RESET",v->{float[] c={0.10f,0.14f,0.90f,0.14f,0.90f,0.86f,0.10f,0.86f};calibrationView.setCorners(c);analyzer.setCorners(c);}));
+        calibrationToolbar.addView(makeButton("RESTART CAM",v->restartCamera("manual calibration")));
         calibrationToolbar.addView(makeButton("DONE",v->exitCalibration()));
         FrameLayout.LayoutParams p=new FrameLayout.LayoutParams(-2,-2);p.gravity=Gravity.TOP|Gravity.CENTER_HORIZONTAL;p.topMargin=dp(8);calibrationToolbar.setVisibility(View.GONE);root.addView(calibrationToolbar,p);
     }
@@ -123,9 +156,11 @@ public final class MainActivity extends ComponentActivity {
         settingsPanel=new LinearLayout(this);settingsPanel.setOrientation(LinearLayout.VERTICAL);settingsPanel.setPadding(dp(18),dp(14),dp(18),dp(18));scroll.addView(settingsPanel,new ScrollView.LayoutParams(-1,-2));
         TextView title=text("Ambi Projector · Settings",20,Color.WHITE);title.setPadding(0,0,0,dp(8));settingsPanel.addView(title);
         TextView hint=text("Camera correction compensates capture. Ambient correction compensates the projector.",12,0xFFBBBBBB);hint.setPadding(0,0,0,dp(12));settingsPanel.addView(hint);
+        cameraStatusLabel=text("Camera: STARTING",13,0xFFFFB74D);cameraStatusLabel.setPadding(0,0,0,dp(8));settingsPanel.addView(cameraStatusLabel);
         LinearLayout actions=new LinearLayout(this);actions.setOrientation(LinearLayout.HORIZONTAL);
         actions.addView(makeButton("PREVIEW",v->togglePreview()));
         actions.addView(makeButton("TV CALIBRATE",v->enterCalibration()));
+        actions.addView(makeButton("RESTART CAMERA",v->restartCamera("manual settings")));
         actions.addView(makeButton("KEYSTONE",v->enterProjectorCalibration()));
         actions.addView(makeButton("CLOSE",v->toggleSettings()));settingsPanel.addView(actions);
 
@@ -153,101 +188,80 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private interface FloatConsumer{void accept(float v);}
-
-    private void addBiPolarSlider(String title,String neg,String pos,String key,FloatConsumer consumer){
-        LinearLayout box=new LinearLayout(this);box.setOrientation(LinearLayout.VERTICAL);TextView label=text("",14,Color.WHITE);
-        float initial=prefs.getFloat(key,0f);label.setText(bipolarLabel(title,neg,pos,initial));box.addView(label);
-        SeekBar seek=new SeekBar(this);seek.setMax(1000);seek.setProgress(Math.round((initial+1f)*500f));box.addView(seek,new LinearLayout.LayoutParams(-1,dp(40)));
-        seek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener(){@Override public void onProgressChanged(SeekBar s,int p,boolean fromUser){float v=p/500f-1f;label.setText(bipolarLabel(title,neg,pos,v));if(analyzer!=null)consumer.accept(v);if(fromUser)prefs.edit().putFloat(key,v).apply();}@Override public void onStartTrackingTouch(SeekBar s){}@Override public void onStopTrackingTouch(SeekBar s){}});
-        settingsPanel.addView(box);
-    }
-
+    private void addBiPolarSlider(String title,String neg,String pos,String key,FloatConsumer consumer){LinearLayout box=new LinearLayout(this);box.setOrientation(LinearLayout.VERTICAL);TextView label=text("",14,Color.WHITE);float initial=prefs.getFloat(key,0f);label.setText(bipolarLabel(title,neg,pos,initial));box.addView(label);SeekBar seek=new SeekBar(this);seek.setMax(1000);seek.setProgress(Math.round((initial+1f)*500f));box.addView(seek,new LinearLayout.LayoutParams(-1,dp(40)));seek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener(){@Override public void onProgressChanged(SeekBar s,int p,boolean fromUser){float v=p/500f-1f;label.setText(bipolarLabel(title,neg,pos,v));if(analyzer!=null)consumer.accept(v);if(fromUser)prefs.edit().putFloat(key,v).apply();}@Override public void onStartTrackingTouch(SeekBar s){}@Override public void onStopTrackingTouch(SeekBar s){}});settingsPanel.addView(box);}
     private String bipolarLabel(String title,String neg,String pos,float v){if(Math.abs(v)<0.035f)return title+": Neutral";return String.format(Locale.US,"%s: %s %.0f%%",title,v<0?neg:pos,Math.abs(v)*100f);}
-
-    private void addFloatSlider(String title,float min,float max,float def,String key,FloatConsumer consumer){
-        LinearLayout box=new LinearLayout(this);box.setOrientation(LinearLayout.VERTICAL);TextView label=text("",14,Color.WHITE);
-        float initial=prefs.getFloat(key,def);label.setText(String.format(Locale.US,"%s: %.2f",title,initial));box.addView(label);
-        SeekBar seek=new SeekBar(this);seek.setMax(1000);seek.setProgress(Math.round((initial-min)/(max-min)*1000f));box.addView(seek,new LinearLayout.LayoutParams(-1,dp(40)));
-        seek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener(){@Override public void onProgressChanged(SeekBar s,int p,boolean fromUser){float v=min+(max-min)*(p/1000f);label.setText(String.format(Locale.US,"%s: %.2f",title,v));if(analyzer!=null)consumer.accept(v);if(fromUser)prefs.edit().putFloat(key,v).apply();}@Override public void onStartTrackingTouch(SeekBar s){}@Override public void onStopTrackingTouch(SeekBar s){}});
-        settingsPanel.addView(box);
-    }
-
+    private void addFloatSlider(String title,float min,float max,float def,String key,FloatConsumer consumer){LinearLayout box=new LinearLayout(this);box.setOrientation(LinearLayout.VERTICAL);TextView label=text("",14,Color.WHITE);float initial=prefs.getFloat(key,def);label.setText(String.format(Locale.US,"%s: %.2f",title,initial));box.addView(label);SeekBar seek=new SeekBar(this);seek.setMax(1000);seek.setProgress(Math.round((initial-min)/(max-min)*1000f));box.addView(seek,new LinearLayout.LayoutParams(-1,dp(40)));seek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener(){@Override public void onProgressChanged(SeekBar s,int p,boolean fromUser){float v=min+(max-min)*(p/1000f);label.setText(String.format(Locale.US,"%s: %.2f",title,v));if(analyzer!=null)consumer.accept(v);if(fromUser)prefs.edit().putFloat(key,v).apply();}@Override public void onStartTrackingTouch(SeekBar s){}@Override public void onStopTrackingTouch(SeekBar s){}});settingsPanel.addView(box);}
     private void addSection(String s){TextView v=text(s,13,Color.WHITE);v.setPadding(0,dp(16),0,dp(5));settingsPanel.addView(v);}
     private TextView text(String s,float size,int color){TextView v=new TextView(this);v.setText(s);v.setTextSize(size);v.setTextColor(color);return v;}
+    private void addExposureControl(){exposureLabel=text("Exposure compensation: 0",14,Color.WHITE);settingsPanel.addView(exposureLabel);exposureSeek=new SeekBar(this);exposureSeek.setMax(1000);exposureSeek.setProgress(500);settingsPanel.addView(exposureSeek,new LinearLayout.LayoutParams(-1,dp(40)));exposureSeek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener(){@Override public void onProgressChanged(SeekBar s,int p,boolean f){if(f)applyExposureFromSlider(p,true);}@Override public void onStartTrackingTouch(SeekBar s){}@Override public void onStopTrackingTouch(SeekBar s){}});}
+    private void addZoomControl(){zoomLabel=text("Camera zoom: 1.80x",14,Color.WHITE);settingsPanel.addView(zoomLabel);zoomSeek=new SeekBar(this);zoomSeek.setMax(1000);zoomSeek.setProgress(115);settingsPanel.addView(zoomSeek,new LinearLayout.LayoutParams(-1,dp(40)));zoomSeek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener(){@Override public void onProgressChanged(SeekBar s,int p,boolean f){if(f)applyZoomFromSlider(p,true);}@Override public void onStartTrackingTouch(SeekBar s){}@Override public void onStopTrackingTouch(SeekBar s){}});}
 
-    private void addExposureControl(){
-        exposureLabel=text("Exposure compensation: 0",14,Color.WHITE);settingsPanel.addView(exposureLabel);
-        exposureSeek=new SeekBar(this);exposureSeek.setMax(1000);exposureSeek.setProgress(500);settingsPanel.addView(exposureSeek,new LinearLayout.LayoutParams(-1,dp(40)));
-        exposureSeek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener(){@Override public void onProgressChanged(SeekBar s,int p,boolean f){if(f)applyExposureFromSlider(p,true);}@Override public void onStartTrackingTouch(SeekBar s){}@Override public void onStopTrackingTouch(SeekBar s){}});
-    }
+    private void restoreSettings(){if(analyzer==null)return;analyzer.setCaptureContrast(prefs.getFloat("captureContrast",1f));analyzer.setCaptureSaturation(prefs.getFloat("captureSaturation",1f));analyzer.setCaptureColorTemperature(prefs.getFloat("captureColorTemperature",0f));analyzer.setCaptureTint(prefs.getFloat("captureTint",0f));analyzer.setCaptureRedGain(prefs.getFloat("captureRedGain",1f));analyzer.setCaptureGreenGain(prefs.getFloat("captureGreenGain",1f));analyzer.setCaptureBlueGain(prefs.getFloat("captureBlueGain",1f));analyzer.setAmbientBrightness(prefs.getFloat("ambientBrightness",1f));analyzer.setAmbientContrast(prefs.getFloat("ambientContrast",1f));analyzer.setAmbientColorTemperature(prefs.getFloat("ambientColorTemperature",0f));analyzer.setSmoothing(prefs.getFloat("smoothing",0.68f));ambilightView.setOuterFadeRatio(prefs.getFloat("outerFade",0.16f));ambilightView.setKeystoneCorners(loadKeystone());calibrationZoom=prefs.getFloat("cameraZoom",1.8f);requestedExposureIndex=prefs.getInt("exposureIndex",0);}
+    private void resetSettings(){prefs.edit().clear().apply();analyzer.setCaptureContrast(1f);analyzer.setCaptureSaturation(1f);analyzer.setCaptureColorTemperature(0f);analyzer.setCaptureTint(0f);analyzer.setCaptureRedGain(1f);analyzer.setCaptureGreenGain(1f);analyzer.setCaptureBlueGain(1f);analyzer.setAmbientBrightness(1f);analyzer.setAmbientContrast(1f);analyzer.setAmbientColorTemperature(0f);analyzer.setSmoothing(0.68f);ambilightView.setOuterFadeRatio(0.16f);float[] k=defaultKeystone();ambilightView.setKeystoneCorners(k);projectorKeystoneView.setCorners(k);calibrationZoom=1.8f;requestedExposureIndex=0;applyZoom(calibrationZoom);applyExposureIndex(0,false);Toast.makeText(this,"Settings reset · reopen panel to refresh sliders",Toast.LENGTH_SHORT).show();}
 
-    private void addZoomControl(){
-        zoomLabel=text("Camera zoom: 1.80x",14,Color.WHITE);settingsPanel.addView(zoomLabel);
-        zoomSeek=new SeekBar(this);zoomSeek.setMax(1000);zoomSeek.setProgress(115);settingsPanel.addView(zoomSeek,new LinearLayout.LayoutParams(-1,dp(40)));
-        zoomSeek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener(){@Override public void onProgressChanged(SeekBar s,int p,boolean f){if(f)applyZoomFromSlider(p,true);}@Override public void onStartTrackingTouch(SeekBar s){}@Override public void onStopTrackingTouch(SeekBar s){}});
-    }
-
-    private void restoreSettings(){
-        if(analyzer==null)return;
-        analyzer.setCaptureContrast(prefs.getFloat("captureContrast",1f));analyzer.setCaptureSaturation(prefs.getFloat("captureSaturation",1f));
-        analyzer.setCaptureColorTemperature(prefs.getFloat("captureColorTemperature",0f));analyzer.setCaptureTint(prefs.getFloat("captureTint",0f));
-        analyzer.setCaptureRedGain(prefs.getFloat("captureRedGain",1f));analyzer.setCaptureGreenGain(prefs.getFloat("captureGreenGain",1f));analyzer.setCaptureBlueGain(prefs.getFloat("captureBlueGain",1f));
-        analyzer.setAmbientBrightness(prefs.getFloat("ambientBrightness",1f));analyzer.setAmbientContrast(prefs.getFloat("ambientContrast",1f));analyzer.setAmbientColorTemperature(prefs.getFloat("ambientColorTemperature",0f));
-        analyzer.setSmoothing(prefs.getFloat("smoothing",0.68f));ambilightView.setOuterFadeRatio(prefs.getFloat("outerFade",0.16f));
-        ambilightView.setKeystoneCorners(loadKeystone());
-        calibrationZoom=prefs.getFloat("cameraZoom",1.8f);requestedExposureIndex=prefs.getInt("exposureIndex",0);
-    }
-
-    private void resetSettings(){
-        prefs.edit().clear().apply();
-        analyzer.setCaptureContrast(1f);analyzer.setCaptureSaturation(1f);analyzer.setCaptureColorTemperature(0f);analyzer.setCaptureTint(0f);analyzer.setCaptureRedGain(1f);analyzer.setCaptureGreenGain(1f);analyzer.setCaptureBlueGain(1f);
-        analyzer.setAmbientBrightness(1f);analyzer.setAmbientContrast(1f);analyzer.setAmbientColorTemperature(0f);analyzer.setSmoothing(0.68f);ambilightView.setOuterFadeRatio(0.16f);
-        float[] k=defaultKeystone();ambilightView.setKeystoneCorners(k);projectorKeystoneView.setCorners(k);
-        calibrationZoom=1.8f;requestedExposureIndex=0;applyZoom(calibrationZoom);applyExposureIndex(0,false);
-        Toast.makeText(this,"Settings reset · reopen panel to refresh sliders",Toast.LENGTH_SHORT).show();
-    }
-
-    private float[] defaultKeystone(){return new float[]{0f,0f, 1f,0f, 1f,1f, 0f,1f};}
+    private float[] defaultKeystone(){return new float[]{0f,0f,1f,0f,1f,1f,0f,1f};}
     private float[] loadKeystone(){float[] d=defaultKeystone(),c=new float[8];for(int i=0;i<8;i++)c[i]=prefs.getFloat("keystone"+i,d[i]);return c;}
     private void saveKeystone(float[] c){SharedPreferences.Editor e=prefs.edit();for(int i=0;i<8;i++)e.putFloat("keystone"+i,c[i]);e.apply();}
 
-    private void toggleSettings(){settingsVisible=!settingsVisible;View v=root.findViewWithTag("settingsScroll");if(v!=null)v.setVisibility(settingsVisible?View.VISIBLE:View.GONE);if(!settingsVisible&&previewVisible){calibrationContainer.setVisibility(View.GONE);previewVisible=false;}}
-    private void togglePreview(){previewVisible=!previewVisible;calibrationContainer.setVisibility(previewVisible?View.VISIBLE:View.GONE);calibrationView.setVisibility(View.GONE);}
+    private void toggleSettings(){settingsVisible=!settingsVisible;View v=root.findViewWithTag("settingsScroll");if(v!=null)v.setVisibility(settingsVisible?View.VISIBLE:View.GONE);if(!settingsVisible&&previewVisible){calibrationContainer.setVisibility(View.INVISIBLE);previewVisible=false;}}
+    private void togglePreview(){previewVisible=!previewVisible;calibrationContainer.setVisibility(previewVisible?View.VISIBLE:View.INVISIBLE);calibrationView.setVisibility(View.GONE);if(previewVisible&&lastFrameAt==0L)restartCamera("preview requested");}
     private TextView makeButton(String s,View.OnClickListener l){TextView b=text(s,13,Color.WHITE);b.setGravity(Gravity.CENTER);b.setPadding(dp(11),dp(9),dp(11),dp(9));b.setBackgroundColor(0xAA333333);LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(-2,-2);p.setMargins(dp(3),dp(2),dp(3),dp(2));b.setLayoutParams(p);b.setOnClickListener(l);return b;}
 
-    private void enterCalibration(){if(analyzer==null||projectorCalibrating)return;calibrating=true;previewVisible=true;settingsVisible=false;View v=root.findViewWithTag("settingsScroll");if(v!=null)v.setVisibility(View.GONE);applyZoom(calibrationZoom);calibrationContainer.setVisibility(View.VISIBLE);calibrationView.setCorners(analyzer.getCorners());calibrationView.setVisibility(View.VISIBLE);calibrationToolbar.setVisibility(View.VISIBLE);ambilightView.setVisibility(View.GONE);Toast.makeText(this,"TV camera calibration · adjust zoom then drag all 4 corners",Toast.LENGTH_LONG).show();}
-    private void exitCalibration(){calibrating=false;previewVisible=false;calibrationView.setVisibility(View.GONE);calibrationToolbar.setVisibility(View.GONE);calibrationContainer.setVisibility(View.GONE);ambilightView.setVisibility(View.VISIBLE);Toast.makeText(this,String.format(Locale.US,"TV borders saved · camera zoom %.2fx",calibrationZoom),Toast.LENGTH_SHORT).show();}
+    private void enterCalibration(){if(analyzer==null||projectorCalibrating)return;calibrating=true;previewVisible=true;settingsVisible=false;View v=root.findViewWithTag("settingsScroll");if(v!=null)v.setVisibility(View.GONE);applyZoom(calibrationZoom);calibrationContainer.setVisibility(View.VISIBLE);calibrationView.setCorners(analyzer.getCorners());calibrationView.setVisibility(View.VISIBLE);calibrationToolbar.setVisibility(View.VISIBLE);ambilightView.setVisibility(View.GONE);restartCamera("enter TV calibration");Toast.makeText(this,"TV camera calibration · adjust zoom then drag all 4 corners",Toast.LENGTH_LONG).show();}
+    private void exitCalibration(){calibrating=false;previewVisible=false;calibrationView.setVisibility(View.GONE);calibrationToolbar.setVisibility(View.GONE);calibrationContainer.setVisibility(View.INVISIBLE);ambilightView.setVisibility(View.VISIBLE);Toast.makeText(this,String.format(Locale.US,"TV borders saved · camera zoom %.2fx",calibrationZoom),Toast.LENGTH_SHORT).show();}
+    private void enterProjectorCalibration(){if(calibrating)return;settingsVisible=false;View v=root.findViewWithTag("settingsScroll");if(v!=null)v.setVisibility(View.GONE);previewVisible=false;calibrationContainer.setVisibility(View.INVISIBLE);projectorCalibrating=true;projectorKeystoneView.setCorners(ambilightView.getKeystoneCorners());projectorKeystoneView.setVisibility(View.VISIBLE);projectorToolbar.setVisibility(View.VISIBLE);Toast.makeText(this,"Projector keystone · drag TL/TR/BR/BL until the projected boundary is rectangular",Toast.LENGTH_LONG).show();}
+    private void exitProjectorCalibration(){float[] c=projectorKeystoneView.getCorners();ambilightView.setKeystoneCorners(c);saveKeystone(c);projectorCalibrating=false;projectorKeystoneView.setVisibility(View.GONE);projectorToolbar.setVisibility(View.GONE);Toast.makeText(this,"Projector keystone saved",Toast.LENGTH_SHORT).show();}
 
-    private void enterProjectorCalibration(){
-        if(calibrating)return;
-        settingsVisible=false;View v=root.findViewWithTag("settingsScroll");if(v!=null)v.setVisibility(View.GONE);
-        previewVisible=false;calibrationContainer.setVisibility(View.GONE);
-        projectorCalibrating=true;
-        projectorKeystoneView.setCorners(ambilightView.getKeystoneCorners());
-        projectorKeystoneView.setVisibility(View.VISIBLE);projectorToolbar.setVisibility(View.VISIBLE);
-        Toast.makeText(this,"Projector keystone · drag TL/TR/BR/BL until the projected boundary is rectangular",Toast.LENGTH_LONG).show();
-    }
-
-    private void exitProjectorCalibration(){
-        float[] c=projectorKeystoneView.getCorners();ambilightView.setKeystoneCorners(c);saveKeystone(c);
-        projectorCalibrating=false;projectorKeystoneView.setVisibility(View.GONE);projectorToolbar.setVisibility(View.GONE);
-        Toast.makeText(this,"Projector keystone saved",Toast.LENGTH_SHORT).show();
+    private void setCameraStatus(String status,int color){if(cameraStatusLabel!=null){cameraStatusLabel.setText("Camera: "+status);cameraStatusLabel.setTextColor(color);}}
+    private void restartCamera(String reason){
+        if(cameraBinding||destroyed)return;
+        long now=SystemClock.elapsedRealtime();
+        if(now-lastRestartAt<1000L)return;
+        lastRestartAt=now;lastFrameAt=0L;
+        Log.w(TAG,"Restarting camera: "+reason);
+        setCameraStatus("RESTARTING",0xFFFFB74D);
+        startCameraSafely();
     }
 
     private void changeZoom(float d){calibrationZoom=Math.max(1f,calibrationZoom+d);applyZoom(calibrationZoom);syncZoomSlider();}
     private void applyZoom(float requested){if(boundCamera==null)return;try{androidx.camera.core.ZoomState z=boundCamera.getCameraInfo().getZoomState().getValue();float max=z==null?requested:z.getMaxZoomRatio(),min=z==null?1f:z.getMinZoomRatio();calibrationZoom=Math.max(min,Math.min(max,requested));boundCamera.getCameraControl().setZoomRatio(calibrationZoom);prefs.edit().putFloat("cameraZoom",calibrationZoom).apply();if(zoomLabel!=null)zoomLabel.setText(String.format(Locale.US,"Camera zoom: %.2fx",calibrationZoom));}catch(Throwable t){Log.w(TAG,"Zoom unavailable",t);}}
     private void applyZoomFromSlider(int p,boolean persist){if(boundCamera==null)return;try{androidx.camera.core.ZoomState z=boundCamera.getCameraInfo().getZoomState().getValue();if(z==null)return;float ratio=z.getMinZoomRatio()+(z.getMaxZoomRatio()-z.getMinZoomRatio())*(p/1000f);calibrationZoom=ratio;boundCamera.getCameraControl().setZoomRatio(ratio);zoomLabel.setText(String.format(Locale.US,"Camera zoom: %.2fx",ratio));if(persist)prefs.edit().putFloat("cameraZoom",ratio).apply();}catch(Throwable t){Log.w(TAG,"Zoom slider",t);}}
     private void syncZoomSlider(){if(boundCamera==null||zoomSeek==null)return;try{androidx.camera.core.ZoomState z=boundCamera.getCameraInfo().getZoomState().getValue();if(z==null)return;float p=(calibrationZoom-z.getMinZoomRatio())/(z.getMaxZoomRatio()-z.getMinZoomRatio());zoomSeek.setProgress(Math.round(Math.max(0f,Math.min(1f,p))*1000f));}catch(Throwable ignored){}}
-
     private void applyExposureFromSlider(int p,boolean persist){if(boundCamera==null)return;try{ExposureState e=boundCamera.getCameraInfo().getExposureState();Range<Integer> r=e.getExposureCompensationRange();applyExposureIndex(Math.round(r.getLower()+(r.getUpper()-r.getLower())*(p/1000f)),persist);}catch(Throwable t){Log.w(TAG,"Exposure slider",t);}}
     private void applyExposureIndex(int requested,boolean persist){if(boundCamera==null)return;try{ExposureState e=boundCamera.getCameraInfo().getExposureState();Range<Integer> r=e.getExposureCompensationRange();int idx=Math.max(r.getLower(),Math.min(r.getUpper(),requested));requestedExposureIndex=idx;if(e.isExposureCompensationSupported())boundCamera.getCameraControl().setExposureCompensationIndex(idx);if(exposureLabel!=null)exposureLabel.setText("Exposure compensation: "+idx);if(persist)prefs.edit().putInt("exposureIndex",idx).apply();syncExposureSlider();}catch(Throwable t){Log.w(TAG,"Exposure unavailable",t);}}
     private void syncExposureSlider(){if(boundCamera==null||exposureSeek==null)return;try{ExposureState e=boundCamera.getCameraInfo().getExposureState();Range<Integer> r=e.getExposureCompensationRange();int min=r.getLower(),max=r.getUpper();exposureSeek.setEnabled(e.isExposureCompensationSupported()&&max>min);float p=max==min?0.5f:(requestedExposureIndex-min)/(float)(max-min);exposureSeek.setProgress(Math.round(Math.max(0f,Math.min(1f,p))*1000f));}catch(Throwable ignored){}}
 
-    private void startCameraSafely(){try{startCamera();}catch(Throwable t){showFatalError("Camera setup",t);}}
-    private void startCamera(){ListenableFuture<ProcessCameraProvider> f=ProcessCameraProvider.getInstance(this);f.addListener(()->{try{ProcessCameraProvider p=f.get();p.unbindAll();Preview preview=new Preview.Builder().setTargetResolution(new Size(640,480)).build();preview.setSurfaceProvider(previewView.getSurfaceProvider());ImageAnalysis analysis=new ImageAnalysis.Builder().setTargetResolution(new Size(640,480)).setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888).build();analysis.setAnalyzer(cameraExecutor,analyzer);boundCamera=p.bindToLifecycle(this,CameraSelector.DEFAULT_BACK_CAMERA,preview,analysis);applyZoom(calibrationZoom);applyExposureIndex(requestedExposureIndex,false);syncZoomSlider();syncExposureSlider();}catch(Throwable t){showFatalError("Camera",t);}},ContextCompat.getMainExecutor(this));}
+    private void startCameraSafely(){
+        if(cameraBinding||destroyed)return;
+        cameraBinding=true;setCameraStatus("STARTING",0xFFFFB74D);
+        try{startCamera();}catch(Throwable t){cameraBinding=false;setCameraStatus("ERROR",0xFFEF5350);Log.e(TAG,"Camera setup",t);}
+    }
+    private void startCamera(){
+        ListenableFuture<ProcessCameraProvider> f=ProcessCameraProvider.getInstance(this);
+        f.addListener(()->{
+            try{
+                cameraProvider=f.get();cameraProvider.unbindAll();
+                Preview preview=new Preview.Builder().setTargetResolution(new Size(640,480)).build();
+                preview.setSurfaceProvider(previewView.getSurfaceProvider());
+                ImageAnalysis analysis=new ImageAnalysis.Builder().setTargetResolution(new Size(640,480)).setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888).build();
+                analysis.setAnalyzer(cameraExecutor,analyzer);
+                boundCamera=cameraProvider.bindToLifecycle(this,CameraSelector.DEFAULT_BACK_CAMERA,preview,analysis);
+                applyZoom(calibrationZoom);applyExposureIndex(requestedExposureIndex,false);syncZoomSlider();syncExposureSlider();
+                setCameraStatus("BOUND · waiting frames",0xFFFFB74D);
+            }catch(Throwable t){setCameraStatus("ERROR · "+t.getClass().getSimpleName(),0xFFEF5350);Log.e(TAG,"Camera bind",t);}
+            finally{cameraBinding=false;}
+        },ContextCompat.getMainExecutor(this));
+    }
 
-    @Override public void onRequestPermissionsResult(int requestCode,@NonNull String[] permissions,@NonNull int[] results){super.onRequestPermissionsResult(requestCode,permissions,results);if(requestCode==CAMERA_REQUEST&&results.length>0&&results[0]==PackageManager.PERMISSION_GRANTED)startCameraSafely();}
+    @Override protected void onResume(){
+        super.onResume();
+        if(ContextCompat.checkSelfPermission(this,Manifest.permission.CAMERA)==PackageManager.PERMISSION_GRANTED){
+            mainHandler.postDelayed(()->{if(!destroyed&&(lastFrameAt==0L||SystemClock.elapsedRealtime()-lastFrameAt>CAMERA_STALL_MS))restartCamera("activity resume");},700L);
+        }
+    }
+    @Override protected void onPause(){super.onPause();setCameraStatus("PAUSED",0xFFAAAAAA);}
+    @Override public void onRequestPermissionsResult(int requestCode,@NonNull String[] permissions,@NonNull int[] results){super.onRequestPermissionsResult(requestCode,permissions,results);if(requestCode==CAMERA_REQUEST&&results.length>0&&results[0]==PackageManager.PERMISSION_GRANTED)restartCamera("permission granted");}
     private void showFatalError(String stage,Throwable t){Log.e(TAG,stage,t);runOnUiThread(()->{TextView e=text("Ambi Projector diagnostic\n\n"+stage+" error:\n"+t.getClass().getName()+"\n"+(t.getMessage()==null?"(no message)":t.getMessage()),15,Color.WHITE);e.setBackgroundColor(Color.BLACK);e.setPadding(dp(18),dp(18),dp(18),dp(18));setContentView(e);});}
     private int dp(int v){return Math.round(v*getResources().getDisplayMetrics().density);}
-    @Override protected void onDestroy(){super.onDestroy();if(cameraExecutor!=null)cameraExecutor.shutdownNow();}
+    @Override protected void onDestroy(){destroyed=true;mainHandler.removeCallbacksAndMessages(null);if(cameraProvider!=null)try{cameraProvider.unbindAll();}catch(Throwable ignored){};if(cameraExecutor!=null)cameraExecutor.shutdownNow();super.onDestroy();}
 }
