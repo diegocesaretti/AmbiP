@@ -1,6 +1,7 @@
 package com.bwa3d.ambiprojector;
 
 import android.graphics.Color;
+import android.util.Base64;
 import android.util.Log;
 
 import org.json.JSONArray;
@@ -16,12 +17,10 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
-import java.util.Base64;
-import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-/** Lightweight reconnecting WebSocket client for the TV Source ambip-light-v1 metadata stream. */
+/** Reconnecting WebSocket client for ambip-light-v2, with projector-side temporal smoothing. */
 public final class LightStreamClient {
     public interface Listener {
         void onState(AmbilightState state);
@@ -33,10 +32,13 @@ public final class LightStreamClient {
     private final Listener listener;
     private volatile boolean running;
     private volatile Socket socket;
+    private volatile float smoothing = 0.45f;
     private String host;
     private int port;
+    private int[] prevTop, prevBottom, prevLeft, prevRight;
 
     public LightStreamClient(Listener listener) { this.listener = listener; }
+    public void setSmoothing(float value) { smoothing = Math.max(0f, Math.min(0.95f, value)); }
 
     public synchronized void connect(String address) {
         stopSocket();
@@ -44,6 +46,7 @@ public final class LightStreamClient {
         host = e.host;
         port = e.port;
         running = true;
+        prevTop = prevBottom = prevLeft = prevRight = null;
         worker.execute(this::connectionLoop);
     }
 
@@ -81,7 +84,7 @@ public final class LightStreamClient {
 
     private void websocketHandshake(InputStream in, OutputStream out) throws Exception {
         byte[] random = new byte[16]; new SecureRandom().nextBytes(random);
-        String key = Base64.getEncoder().encodeToString(random);
+        String key = Base64.encodeToString(random, Base64.NO_WRAP);
         String request = "GET /ws HTTP/1.1\r\n" +
                 "Host: " + host + ":" + port + "\r\n" +
                 "Upgrade: websocket\r\n" +
@@ -98,18 +101,21 @@ public final class LightStreamClient {
         while (running && socket != null && !socket.isClosed()) {
             int b0 = in.read(); if (b0 < 0) throw new IOException("EOF");
             int b1 = in.read(); if (b1 < 0) throw new IOException("EOF");
-            int opcode = b0 & 0x0f;
-            boolean masked = (b1 & 0x80) != 0;
-            long length = b1 & 0x7f;
-            if (length == 126) length = ((long)(in.read() & 255) << 8) | (in.read() & 255);
-            else if (length == 127) { length = 0; for (int i=0;i<8;i++) length = (length << 8) | (in.read() & 255); }
+            int opcode = b0 & 15;
+            boolean masked = (b1 & 128) != 0;
+            long length = b1 & 127;
+            if (length == 126) {
+                int a=in.read(), b=in.read(); if(a<0||b<0)throw new IOException("EOF");
+                length=((long)(a&255)<<8)|(b&255);
+            } else if (length == 127) {
+                length=0; for(int i=0;i<8;i++){int v=in.read();if(v<0)throw new IOException("EOF");length=(length<<8)|(v&255);}
+            }
             if (length < 0 || length > 1024 * 1024) throw new IOException("Invalid frame length");
-            byte[] mask = masked ? in.readNBytes(4) : null;
-            byte[] payload = in.readNBytes((int)length);
-            if (payload.length != (int)length) throw new IOException("Short frame");
+            byte[] mask = masked ? readExactly(in,4) : null;
+            byte[] payload = readExactly(in,(int)length);
             if (masked && mask != null) for (int i=0;i<payload.length;i++) payload[i] ^= mask[i & 3];
             if (opcode == 8) throw new IOException("Server closed");
-            if (opcode == 9) { writeMaskedControl(out, 10, payload); continue; }
+            if (opcode == 9) { writeMaskedControl(out,10,payload); continue; }
             if (opcode != 1) continue;
             parseLightFrame(new String(payload, StandardCharsets.UTF_8));
         }
@@ -117,60 +123,81 @@ public final class LightStreamClient {
 
     private void parseLightFrame(String json) throws Exception {
         JSONObject o = new JSONObject(json);
-        if (!"ambip-light-v1".equals(o.optString("protocol"))) return;
-        int[] top = colors(o.getJSONArray("top"), AmbilightState.H_SEGMENTS);
-        int[] bottom = colors(o.getJSONArray("bottom"), AmbilightState.H_SEGMENTS);
-        int[] left = colors(o.getJSONArray("left"), AmbilightState.V_SEGMENTS);
-        int[] right = colors(o.getJSONArray("right"), AmbilightState.V_SEGMENTS);
-        AmbilightState state = new AmbilightState(top, bottom, left, right,
-                (float)o.optDouble("fps", 0), o.optInt("w", 0), o.optInt("h", 0), 1f);
+        String protocol = o.optString("protocol");
+        int[] top, bottom, left, right;
+        if ("ambip-light-v2".equals(protocol)) {
+            top = packedColors(o.getJSONArray("top"), AmbilightState.H_SEGMENTS);
+            bottom = packedColors(o.getJSONArray("bottom"), AmbilightState.H_SEGMENTS);
+            left = packedColors(o.getJSONArray("left"), AmbilightState.V_SEGMENTS);
+            right = packedColors(o.getJSONArray("right"), AmbilightState.V_SEGMENTS);
+        } else if ("ambip-light-v1".equals(protocol)) {
+            top = legacyColors(o.getJSONArray("top"), AmbilightState.H_SEGMENTS);
+            bottom = legacyColors(o.getJSONArray("bottom"), AmbilightState.H_SEGMENTS);
+            left = legacyColors(o.getJSONArray("left"), AmbilightState.V_SEGMENTS);
+            right = legacyColors(o.getJSONArray("right"), AmbilightState.V_SEGMENTS);
+        } else return;
+
+        prevTop = smooth(top, prevTop, smoothing);
+        prevBottom = smooth(bottom, prevBottom, smoothing);
+        prevLeft = smooth(left, prevLeft, smoothing);
+        prevRight = smooth(right, prevRight, smoothing);
+        AmbilightState state = new AmbilightState(prevTop, prevBottom, prevLeft, prevRight,
+                (float)o.optDouble("fps",0), o.optInt("w",0), o.optInt("h",0), 1f);
         if (listener != null) listener.onState(state);
     }
 
-    private static int[] colors(JSONArray a, int required) throws Exception {
-        int[] out = new int[required];
-        for (int i=0;i<required;i++) {
-            JSONArray sample = a.getJSONArray(Math.min(i, a.length()-1));
-            out[i] = Color.rgb(clamp(sample.optInt(0)), clamp(sample.optInt(1)), clamp(sample.optInt(2)));
+    private static int[] packedColors(JSONArray a,int required) throws Exception {
+        int[] out=new int[required];
+        for(int i=0;i<required;i++){
+            int n=a.optInt(Math.min(i,Math.max(0,a.length()-1)),0)&0x00ffffff;
+            out[i]=0xff000000|n;
         }
         return out;
     }
 
-    private void notifyStatus(String value, boolean connected) {
-        if (listener != null) listener.onStatus(value, connected);
+    private static int[] legacyColors(JSONArray a,int required) throws Exception {
+        int[] out=new int[required];
+        for(int i=0;i<required;i++){
+            JSONArray sample=a.getJSONArray(Math.min(i,a.length()-1));
+            out[i]=Color.rgb(clamp(sample.optInt(0)),clamp(sample.optInt(1)),clamp(sample.optInt(2)));
+        }
+        return out;
     }
 
-    private synchronized void stopSocket() {
-        Socket s = socket; socket = null;
-        if (s != null) try { s.close(); } catch (IOException ignored) {}
+    private static int[] smooth(int[] current,int[] previous,float amount){
+        if(previous==null||previous.length!=current.length||amount<=0f)return current.clone();
+        float old=Math.max(0f,Math.min(0.95f,amount)),fresh=1f-old;
+        int[] out=new int[current.length];
+        for(int i=0;i<current.length;i++){
+            int a=previous[i],b=current[i];
+            int r=Math.round(((a>>16)&255)*old+((b>>16)&255)*fresh);
+            int g=Math.round(((a>>8)&255)*old+((b>>8)&255)*fresh);
+            int bl=Math.round((a&255)*old+(b&255)*fresh);
+            out[i]=0xff000000|(r<<16)|(g<<8)|bl;
+        }
+        return out;
     }
 
-    private static void writeMaskedControl(OutputStream out, int opcode, byte[] payload) throws IOException {
-        byte[] mask = new byte[4]; new SecureRandom().nextBytes(mask);
-        out.write(0x80 | (opcode & 0x0f)); out.write(0x80 | (payload.length & 0x7f)); out.write(mask);
-        for (int i=0;i<payload.length;i++) out.write(payload[i] ^ mask[i & 3]); out.flush();
+    private void notifyStatus(String value,boolean connected){if(listener!=null)listener.onStatus(value,connected);}
+
+    private synchronized void stopSocket(){Socket s=socket;socket=null;if(s!=null)try{s.close();}catch(IOException ignored){}}
+
+    private static byte[] readExactly(InputStream in,int length)throws IOException{
+        byte[] out=new byte[length];int offset=0;while(offset<length){int n=in.read(out,offset,length-offset);if(n<0)throw new IOException("Unexpected EOF");offset+=n;}return out;
     }
 
-    private static String readLine(InputStream in) throws IOException {
-        ByteArrayOutputStream b = new ByteArrayOutputStream(); int c; boolean cr=false;
-        while ((c=in.read())>=0) { if(cr&&c=='\n')break; if(cr){b.write('\r');cr=false;} if(c=='\r')cr=true;else b.write(c); if(b.size()>16384)break; }
-        if(c<0&&b.size()==0)return null; return b.toString(StandardCharsets.UTF_8);
+    private static void writeMaskedControl(OutputStream out,int opcode,byte[] payload)throws IOException{
+        byte[] mask=new byte[4];new SecureRandom().nextBytes(mask);out.write(0x80|(opcode&15));out.write(0x80|(payload.length&127));out.write(mask);for(int i=0;i<payload.length;i++)out.write(payload[i]^mask[i&3]);out.flush();
+    }
+
+    private static String readLine(InputStream in)throws IOException{
+        ByteArrayOutputStream b=new ByteArrayOutputStream();int c;boolean cr=false;while((c=in.read())>=0){if(cr&&c=='\n')break;if(cr){b.write('\r');cr=false;}if(c=='\r')cr=true;else b.write(c);if(b.size()>16384)break;}if(c<0&&b.size()==0)return null;return new String(b.toByteArray(),StandardCharsets.UTF_8);
     }
 
     private static int clamp(int v){return Math.max(0,Math.min(255,v));}
 
-    private static final class Endpoint {
-        final String host; final int port;
-        Endpoint(String host,int port){this.host=host;this.port=port;}
-        static Endpoint parse(String raw) {
-            String s = raw == null ? "" : raw.trim();
-            s = s.replaceFirst("^wss?://", "").replaceFirst("^https?://", "");
-            int slash=s.indexOf('/'); if(slash>=0)s=s.substring(0,slash);
-            String host=s; int port=8080;
-            int colon=s.lastIndexOf(':');
-            if(colon>0 && colon<s.length()-1){try{port=Integer.parseInt(s.substring(colon+1));host=s.substring(0,colon);}catch(Exception ignored){}}
-            if(host.isEmpty())host="127.0.0.1";
-            return new Endpoint(host,port);
-        }
+    private static final class Endpoint{
+        final String host;final int port;Endpoint(String host,int port){this.host=host;this.port=port;}
+        static Endpoint parse(String raw){String s=raw==null?"":raw.trim();s=s.replaceFirst("^wss?://","").replaceFirst("^https?://","");int slash=s.indexOf('/');if(slash>=0)s=s.substring(0,slash);String host=s;int port=8080;int colon=s.lastIndexOf(':');if(colon>0&&colon<s.length()-1){try{port=Integer.parseInt(s.substring(colon+1));host=s.substring(0,colon);}catch(Exception ignored){}}if(host.isEmpty())host="127.0.0.1";return new Endpoint(host,port);}
     }
 }
