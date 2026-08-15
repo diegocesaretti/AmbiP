@@ -10,8 +10,8 @@ android {
         applicationId = "com.bwa3d.ambiprojector"
         minSdk = 23
         targetSdk = 36
-        versionCode = 15
-        versionName = "0.15.0"
+        versionCode = 16
+        versionName = "0.16.0"
     }
 
     buildTypes {
@@ -32,8 +32,4 @@ android {
 
 dependencies {
     implementation("androidx.activity:activity:1.11.0")
-    implementation("androidx.camera:camera-core:1.6.1")
-    implementation("androidx.camera:camera-camera2:1.6.1")
-    implementation("androidx.camera:camera-lifecycle:1.6.1")
-    implementation("androidx.camera:camera-view:1.6.1")
 }
