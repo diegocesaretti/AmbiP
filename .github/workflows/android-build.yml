@@ -2,7 +2,7 @@ name: Android Debug APK
 
 on:
   push:
-    branches: [ main, feature/v024-mibox9-compat ]
+    branches: [ main, feature/v024-mibox9-compat, feature/v026-gpu-renderer ]
   workflow_dispatch:
 
 jobs:
@@ -39,7 +39,7 @@ jobs:
       - name: Upload projector APK
         uses: actions/upload-artifact@v4
         with:
-          name: AmbiProjector-v0.25-FPS-Graphics-Detail-MiBox9
+          name: AmbiProjector-v0.26-GPU-GLES2-MiBox9
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
 
