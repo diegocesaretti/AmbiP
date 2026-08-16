@@ -10,8 +10,8 @@ android {
         applicationId = "com.bwa3d.ambiprojector.mibox"
         minSdk = 23
         targetSdk = 28
-        versionCode = 24
-        versionName = "0.24.0-mibox9"
+        versionCode = 25
+        versionName = "0.25.0-mibox9"
     }
 
     buildTypes {
