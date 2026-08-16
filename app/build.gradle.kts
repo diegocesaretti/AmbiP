@@ -5,12 +5,12 @@ plugins {
 }
 
 // Public, non-production identity used only so sideload APK updates keep the same signature.
-// The PKCS12 is stored as Base64 text because the GitHub contents connector is text-only.
-val stableDebugStore = layout.buildDirectory.file("ambip-sideload-debug.p12").get().asFile
+// The JKS is stored as Base64 text because the GitHub contents connector is text-only.
+val stableDebugStore = layout.buildDirectory.file("ambip-sideload-debug.jks").get().asFile
 stableDebugStore.parentFile.mkdirs()
 stableDebugStore.writeBytes(
     Base64.getMimeDecoder().decode(
-        layout.projectDirectory.file("ambip-sideload-debug.p12.b64").asFile.readText()
+        layout.projectDirectory.file("ambip-sideload-debug.jks.b64").asFile.readText()
     )
 )
 
@@ -32,7 +32,7 @@ android {
             storePassword = "ambipdebug"
             keyAlias = "ambipdebug"
             keyPassword = "ambipdebug"
-            storeType = "PKCS12"
+            storeType = "JKS"
         }
     }
 
