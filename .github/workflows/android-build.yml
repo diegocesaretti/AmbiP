@@ -2,7 +2,7 @@ name: Android Debug APK
 
 on:
   push:
-    branches: [ main, feature/v024-mibox9-compat, feature/v026-gpu-renderer ]
+    branches: [ main, feature/v024-mibox9-compat, feature/v026-gpu-renderer, feature/v026-stable-sideload-signing ]
   workflow_dispatch:
 
 jobs:
@@ -36,10 +36,15 @@ jobs:
       - name: Dump projector APK manifest badging
         run: ${ANDROID_HOME}/build-tools/35.0.0/aapt dump badging app/build/outputs/apk/debug/app-debug.apk | head -30
 
+      - name: Verify stable projector signing certificate
+        run: |
+          unzip -p app/build/outputs/apk/debug/app-debug.apk 'META-INF/*.RSA' > /tmp/ambip-cert.rsa
+          keytool -printcert -file /tmp/ambip-cert.rsa | grep -E 'Owner:|SHA256:'
+
       - name: Upload projector APK
         uses: actions/upload-artifact@v4
         with:
-          name: AmbiProjector-v0.26-GPU-GLES2-MiBox9
+          name: AmbiProjector-v0.26-GPU-GLES2-MiBox9-StableSigned
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
 
