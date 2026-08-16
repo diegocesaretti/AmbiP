@@ -9,11 +9,11 @@
         android:allowBackup="true"
         android:usesCleartextTraffic="true"
         android:banner="@android:drawable/sym_def_app_icon"
-        android:label="AmbiP Projector"
+        android:label="AmbiP Projector Mi Box"
         android:theme="@style/Theme.AmbiProjector">
         <activity
-            android:name=".NetworkProjectorActivity"
-            android:label="AmbiP Projector"
+            android:name="com.bwa3d.ambiprojector.NetworkProjectorActivity"
+            android:label="AmbiP Projector Mi Box"
             android:screenOrientation="landscape"
             android:configChanges="orientation|screenSize|keyboardHidden"
             android:exported="true">
@@ -28,7 +28,7 @@
         </activity>
 
         <receiver
-            android:name=".ProjectorBootReceiver"
+            android:name="com.bwa3d.ambiprojector.ProjectorBootReceiver"
             android:enabled="true"
             android:exported="false">
             <intent-filter>
