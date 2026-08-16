@@ -7,11 +7,11 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.bwa3d.ambiprojector"
+        applicationId = "com.bwa3d.ambiprojector.mibox"
         minSdk = 23
-        targetSdk = 36
-        versionCode = 23
-        versionName = "0.23.0"
+        targetSdk = 28
+        versionCode = 24
+        versionName = "0.24.0-mibox9"
     }
 
     buildTypes {
