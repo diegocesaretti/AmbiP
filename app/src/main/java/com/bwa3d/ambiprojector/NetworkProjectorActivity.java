@@ -12,10 +12,12 @@ import android.view.inputmethod.EditorInfo;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.SeekBar;
 import android.widget.TextView;
 
 import androidx.activity.ComponentActivity;
 
+import java.util.Locale;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -29,8 +31,9 @@ public final class NetworkProjectorActivity extends ComponentActivity {
     private AmbilightView ambilightView;
     private ContentOverlayView contentOverlay;
     private LinearLayout panel;
-    private TextView status, web;
+    private TextView status, web, renderStats, detailLabel;
     private EditText source;
+    private SeekBar detailSeek;
     private TextView connectButton, calibrateButton, blackButton, hideButton, autoStartButton;
     private LightStreamClient client;
     private StateInterpolator interpolator;
@@ -38,10 +41,23 @@ public final class NetworkProjectorActivity extends ComponentActivity {
     private SharedPreferences prefs;
     private boolean panelVisible = true;
     private boolean calibrationVisible;
+    private boolean syncingDetail;
 
     // If rendering is briefly late, overwrite the pending network state instead of building latency.
     private final AtomicReference<AmbilightState> pendingState = new AtomicReference<>();
     private final AtomicBoolean stateDispatchPosted = new AtomicBoolean();
+
+    private final Runnable renderStatsTicker = new Runnable() {
+        @Override public void run() {
+            if (root == null || ambilightView == null) return;
+            if (panelVisible && renderStats != null) {
+                int detail = detailPercent(prefs.getFloat("cloudRenderScale",0.42f));
+                String hw = ambilightView.isHardwareCanvasAccelerated() ? "HW canvas" : "SW canvas";
+                renderStats.setText(String.format(Locale.US,"Renderer %.1f FPS · %s · cloud raster CPU · Detail %d%%",ambilightView.getRenderFps(),hw,detail));
+            }
+            root.postDelayed(this,500);
+        }
+    };
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
@@ -120,21 +136,28 @@ public final class NetworkProjectorActivity extends ComponentActivity {
         ambilightView = new AmbilightView(this);ambilightView.setDebug(false);root.addView(ambilightView, new FrameLayout.LayoutParams(-1,-1));
         contentOverlay = new ContentOverlayView(this);contentOverlay.setDebug(false);root.addView(contentOverlay,new FrameLayout.LayoutParams(-1,-1));
         panel = new LinearLayout(this);panel.setOrientation(LinearLayout.VERTICAL);panel.setPadding(dp(22),dp(18),dp(22),dp(20));panel.setBackgroundColor(0xe6080a0d);
-        TextView title = text("AmbiP · Projector v0.23",22,Color.WHITE); panel.addView(title);TextView help = text("Remote ready · D-pad to move, OK to select. TV Source address:",13,0xffb7c2cf);help.setPadding(0,dp(7),0,dp(9)); panel.addView(help);
+        TextView title = text("AmbiP · Projector v0.25",22,Color.WHITE); panel.addView(title);TextView help = text("Remote ready · D-pad to move, OK to select. TV Source address:",13,0xffb7c2cf);help.setPadding(0,dp(7),0,dp(9)); panel.addView(help);
 
         source = new EditText(this);source.setId(View.generateViewId());source.setTextColor(Color.WHITE); source.setHintTextColor(0xff8b96a3); source.setHint("TV IP / address");source.setSingleLine(true); source.setImeOptions(EditorInfo.IME_ACTION_GO);source.setPadding(dp(13),dp(11),dp(13),dp(11));source.setFocusable(true);source.setFocusableInTouchMode(true);source.setOnFocusChangeListener((v,focused)->styleSource(focused));styleSource(false);panel.addView(source,new LinearLayout.LayoutParams(-1,-2));
-        status = text("Not connected",14,0xffffb74d); status.setPadding(0,dp(10),0,dp(4)); panel.addView(status);web = text("AmbiP Control Center: starting…",12,0xff81d4fa); web.setPadding(0,0,0,dp(10)); web.setTextIsSelectable(true); panel.addView(web);
+        status = text("Not connected",14,0xffffb74d); status.setPadding(0,dp(10),0,dp(4)); panel.addView(status);
+        web = text("AmbiP Control Center: starting…",12,0xff81d4fa); web.setPadding(0,0,0,dp(4)); web.setTextIsSelectable(true); panel.addView(web);
+        renderStats = text("Renderer — FPS",12,0xffc4d7e6);renderStats.setPadding(0,0,0,dp(8));panel.addView(renderStats);
 
         LinearLayout buttons = new LinearLayout(this); buttons.setOrientation(LinearLayout.HORIZONTAL);
         connectButton=button("CONNECT",v->connect());calibrateButton=button("CALIBRATE",v->toggleCalibration());blackButton=button("BLACK",v->ambilightView.setState(AmbilightState.black()));hideButton=button("HIDE",v->togglePanel());
         buttons.addView(connectButton);buttons.addView(calibrateButton);buttons.addView(blackButton);buttons.addView(hideButton);panel.addView(buttons);
 
         LinearLayout secondRow=new LinearLayout(this);secondRow.setOrientation(LinearLayout.HORIZONTAL);autoStartButton=button("AUTO START: OFF",v->toggleAutoStart());secondRow.addView(autoStartButton);panel.addView(secondRow);
+
+        detailLabel=text("GRAPHICS DETAIL",13,0xffd6dde5);detailLabel.setPadding(0,dp(8),0,0);panel.addView(detailLabel);
+        detailSeek=new SeekBar(this);detailSeek.setId(View.generateViewId());detailSeek.setMax(100);detailSeek.setFocusable(true);detailSeek.setFocusableInTouchMode(true);detailSeek.setPadding(dp(5),0,dp(5),0);detailSeek.setOnFocusChangeListener((v,focused)->{detailLabel.setTextColor(focused?0xff81d4fa:0xffd6dde5);detailSeek.setScaleX(focused?1.03f:1f);detailSeek.setScaleY(focused?1.08f:1f);});detailSeek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener(){@Override public void onProgressChanged(SeekBar seekBar,int progress,boolean fromUser){if(syncingDetail||!fromUser)return;float scale=.20f+.80f*(progress/100f);prefs.edit().putFloat("cloudRenderScale",scale).apply();ambilightView.setCloudRenderScale(scale);updateDetailLabel(scale);}@Override public void onStartTrackingTouch(SeekBar seekBar){}@Override public void onStopTrackingTouch(SeekBar seekBar){}});panel.addView(detailSeek,new LinearLayout.LayoutParams(-1,-2));
+        TextView detailHint=text("0% = low-end / fewer gradients · 100% = maximum detail. This changes internal cloud resolution and gradient count, not network latency.",11,0xff96a4b2);detailHint.setPadding(0,0,0,dp(4));panel.addView(detailHint);
+
         wireRemoteNavigation();
 
-        TextView note = text("v0.23: projector Auto Start + full TV-remote focus. If the panel is hidden, press any D-pad/OK key to bring it back.",12,0xffa6b0bc);note.setPadding(0,dp(10),0,0); panel.addView(note);
+        TextView note = text("v0.25: live renderer FPS + graphics detail control. If the panel is hidden, press any D-pad/OK key to bring it back.",12,0xffa6b0bc);note.setPadding(0,dp(8),0,0); panel.addView(note);
         FrameLayout.LayoutParams pp = new FrameLayout.LayoutParams(Math.min(dp(700),Math.round(getResources().getDisplayMetrics().widthPixels*0.70f)),-2);pp.gravity = Gravity.TOP|Gravity.END; pp.setMargins(dp(16),dp(16),dp(16),dp(16)); root.addView(panel,pp);
-        ambilightView.setGestureListener(new AmbilightView.GestureListener() {@Override public void onSingleTap(){togglePanel();}@Override public void onLongPress(){toggleCalibration();}@Override public void onDoubleTap(){boolean d=!ambilightView.isDebug();ambilightView.setDebug(d);contentOverlay.setDebug(d);}});setContentView(root);
+        ambilightView.setGestureListener(new AmbilightView.GestureListener() {@Override public void onSingleTap(){togglePanel();}@Override public void onLongPress(){toggleCalibration();}@Override public void onDoubleTap(){boolean d=!ambilightView.isDebug();ambilightView.setDebug(d);contentOverlay.setDebug(d);}});setContentView(root);root.post(renderStatsTicker);
     }
 
     private void wireRemoteNavigation(){
@@ -144,7 +167,8 @@ public final class NetworkProjectorActivity extends ComponentActivity {
         calibrateButton.setNextFocusUpId(source.getId());calibrateButton.setNextFocusLeftId(connectButton.getId());calibrateButton.setNextFocusRightId(blackButton.getId());calibrateButton.setNextFocusDownId(autoStartButton.getId());
         blackButton.setNextFocusUpId(source.getId());blackButton.setNextFocusLeftId(calibrateButton.getId());blackButton.setNextFocusRightId(hideButton.getId());blackButton.setNextFocusDownId(autoStartButton.getId());
         hideButton.setNextFocusUpId(source.getId());hideButton.setNextFocusLeftId(blackButton.getId());hideButton.setNextFocusDownId(autoStartButton.getId());
-        autoStartButton.setNextFocusUpId(connectButton.getId());
+        autoStartButton.setNextFocusUpId(connectButton.getId());autoStartButton.setNextFocusDownId(detailSeek.getId());
+        detailSeek.setNextFocusUpId(autoStartButton.getId());
     }
 
     private void connect(){String value=source.getText().toString().trim();if(value.isEmpty()){status.setText("Enter the TV Source IP/address");return;}prefs.edit().putString(KEY_SOURCE,value).apply();status.setText("Connecting…");status.setTextColor(0xffffb74d);pendingState.set(null);if(client!=null){client.setSmoothing(prefs.getFloat("networkSmoothing",0.12f));client.connect(value);}}
@@ -165,12 +189,17 @@ public final class NetworkProjectorActivity extends ComponentActivity {
 
     private void applyProjectorSettings(){
         String style=prefs.getString("projectionStyle","COLOR_CLOUD");ambilightView.setProjectionStyle("EDGE_GRADIENT".equals(style)?AmbilightView.ProjectionStyle.EDGE_GRADIENT:AmbilightView.ProjectionStyle.COLOR_CLOUD);
-        ambilightView.setCloudSpread(prefs.getFloat("cloudSpread",0.42f));ambilightView.setCloudRadius(prefs.getFloat("cloudRadius",0.26f));ambilightView.setCloudOpacity(prefs.getFloat("cloudOpacity",0.60f));ambilightView.setCloudSoftness(prefs.getFloat("cloudSoftness",0.72f));ambilightView.setCornerBlend(prefs.getFloat("cornerBlend",0.82f));ambilightView.setCornerRadius(prefs.getFloat("cornerRadius",1.48f));ambilightView.setCloudEdgePull(prefs.getFloat("cloudEdgePull",0.62f));ambilightView.setCloudSaturation(prefs.getFloat("cloudSaturation",1.32f));ambilightView.setCloudBrightness(prefs.getFloat("cloudBrightness",1.08f));ambilightView.setCloudDynamicAmount(prefs.getFloat("cloudDynamicAmount",0.85f));ambilightView.setCloudDynamicRadius(prefs.getFloat("cloudDynamicRadius",0.65f));ambilightView.setCloudDynamicStretch(prefs.getFloat("cloudDynamicStretch",0.85f));ambilightView.setCloudDynamicOpacity(prefs.getFloat("cloudDynamicOpacity",0.18f));ambilightView.setCloudEnergyGamma(prefs.getFloat("cloudEnergyGamma",1.15f));ambilightView.setCloudSaturationWeight(prefs.getFloat("cloudSaturationWeight",0.60f));ambilightView.setCloudLumaWeight(prefs.getFloat("cloudLumaWeight",0.40f));ambilightView.setCloudRenderScale(prefs.getFloat("cloudRenderScale",0.42f));ambilightView.setOuterFadeRatio(prefs.getFloat("outerFade",0.16f));
+        ambilightView.setCloudSpread(prefs.getFloat("cloudSpread",0.42f));ambilightView.setCloudRadius(prefs.getFloat("cloudRadius",0.26f));ambilightView.setCloudOpacity(prefs.getFloat("cloudOpacity",0.60f));ambilightView.setCloudSoftness(prefs.getFloat("cloudSoftness",0.72f));ambilightView.setCornerBlend(prefs.getFloat("cornerBlend",0.82f));ambilightView.setCornerRadius(prefs.getFloat("cornerRadius",1.48f));ambilightView.setCloudEdgePull(prefs.getFloat("cloudEdgePull",0.62f));ambilightView.setCloudSaturation(prefs.getFloat("cloudSaturation",1.32f));ambilightView.setCloudBrightness(prefs.getFloat("cloudBrightness",1.08f));ambilightView.setCloudDynamicAmount(prefs.getFloat("cloudDynamicAmount",0.85f));ambilightView.setCloudDynamicRadius(prefs.getFloat("cloudDynamicRadius",0.65f));ambilightView.setCloudDynamicStretch(prefs.getFloat("cloudDynamicStretch",0.85f));ambilightView.setCloudDynamicOpacity(prefs.getFloat("cloudDynamicOpacity",0.18f));ambilightView.setCloudEnergyGamma(prefs.getFloat("cloudEnergyGamma",1.15f));ambilightView.setCloudSaturationWeight(prefs.getFloat("cloudSaturationWeight",0.60f));ambilightView.setCloudLumaWeight(prefs.getFloat("cloudLumaWeight",0.40f));float detail=prefs.getFloat("cloudRenderScale",0.42f);ambilightView.setCloudRenderScale(detail);updateDetailControl(detail);ambilightView.setOuterFadeRatio(prefs.getFloat("outerFade",0.16f));
         ambilightView.setRgbCalibration(prefs.getFloat("rgbGainR",1f),prefs.getFloat("rgbGainG",1f),prefs.getFloat("rgbGainB",1f),prefs.getInt("rgbOffsetR",0),prefs.getInt("rgbOffsetG",0),prefs.getInt("rgbOffsetB",0));
         float[] k=loadKeystone();float[][] tf=loadTextFrames();ambilightView.setKeystoneCorners(k);ambilightView.setTvQuad(loadTvQuad());ambilightView.setTextFrames(tf);
         contentOverlay.setKeystone(k);contentOverlay.setTextFrames(tf);contentOverlay.setTextStyles(loadTextSizes(),loadTextAligns());contentOverlay.setImageFrames(loadImageFrames());
         calibrationVisible=prefs.getBoolean("calibrationOverlay",calibrationVisible);ambilightView.setDebug(calibrationVisible);contentOverlay.setDebug(calibrationVisible);
     }
+
+    private void updateDetailControl(float scale){if(detailSeek==null)return;syncingDetail=true;detailSeek.setProgress(detailProgress(scale));syncingDetail=false;updateDetailLabel(scale);}
+    private void updateDetailLabel(float scale){if(detailLabel==null)return;int p=detailPercent(scale);String mode=p<=25?"LOW-END":p<=55?"BALANCED":p<=80?"HIGH":"MAX";detailLabel.setText("GRAPHICS DETAIL · "+p+"% · "+mode);}
+    private int detailProgress(float scale){return Math.max(0,Math.min(100,Math.round((Math.max(.20f,Math.min(1f,scale))-.20f)/.80f*100f)));}
+    private int detailPercent(float scale){return detailProgress(scale);}
 
     private float[] loadKeystone(){float[] d={0f,0f,1f,0f,1f,1f,0f,1f},c=new float[8];for(int i=0;i<8;i++)c[i]=prefs.getFloat("keystone"+i,d[i]);return c;}
     private float[] loadTvQuad(){float[] d={.20f,.27f,.80f,.27f,.80f,.73f,.20f,.73f},q=new float[8];for(int i=0;i<8;i++)q[i]=prefs.getFloat("tvQuad"+i,d[i]);return q;}
@@ -188,5 +217,5 @@ public final class NetworkProjectorActivity extends ComponentActivity {
     private int dp(int v){return Math.round(v*getResources().getDisplayMetrics().density);}
 
     @Override protected void onResume(){super.onResume();applyProjectorSettings();applyMotionSettings();updateAutoStartButton();if(client!=null)client.setSmoothing(prefs.getFloat("networkSmoothing",0.12f));}
-    @Override protected void onDestroy(){pendingState.set(null);if(interpolator!=null)interpolator.stop();if(client!=null)client.stop();if(webServer!=null)webServer.stop();if(contentOverlay!=null)contentOverlay.shutdown();super.onDestroy();}
+    @Override protected void onDestroy(){if(root!=null)root.removeCallbacks(renderStatsTicker);pendingState.set(null);if(interpolator!=null)interpolator.stop();if(client!=null)client.stop();if(webServer!=null)webServer.stop();if(contentOverlay!=null)contentOverlay.shutdown();super.onDestroy();}
 }
