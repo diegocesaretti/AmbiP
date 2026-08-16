@@ -2,7 +2,7 @@ name: Android Debug APK
 
 on:
   push:
-    branches: [ main, feature/v023-projector-tv-remote-autostart ]
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
