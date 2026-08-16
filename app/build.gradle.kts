@@ -1,3 +1,5 @@
+import java.util.Base64
+
 plugins {
     id("com.android.application")
 }
@@ -7,7 +9,7 @@ plugins {
 val stableDebugStore = layout.buildDirectory.file("ambip-sideload-debug.p12").get().asFile
 stableDebugStore.parentFile.mkdirs()
 stableDebugStore.writeBytes(
-    java.util.Base64.getMimeDecoder().decode(
+    Base64.getMimeDecoder().decode(
         layout.projectDirectory.file("ambip-sideload-debug.p12.b64").asFile.readText()
     )
 )
