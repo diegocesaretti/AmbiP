@@ -2,6 +2,16 @@ plugins {
     id("com.android.application")
 }
 
+// Public, non-production identity used only so sideload APK updates keep the same signature.
+// The PKCS12 is stored as Base64 text because the GitHub contents connector is text-only.
+val stableDebugStore = layout.buildDirectory.file("ambip-sideload-debug.p12").get().asFile
+stableDebugStore.parentFile.mkdirs()
+stableDebugStore.writeBytes(
+    java.util.Base64.getMimeDecoder().decode(
+        layout.projectDirectory.file("ambip-sideload-debug.p12.b64").asFile.readText()
+    )
+)
+
 android {
     namespace = "com.bwa3d.ambiprojector"
     compileSdk = 36
@@ -14,7 +24,20 @@ android {
         versionName = "0.26.0-mibox9-gpu"
     }
 
+    signingConfigs {
+        create("sideload") {
+            storeFile = stableDebugStore
+            storePassword = "ambipdebug"
+            keyAlias = "ambipdebug"
+            keyPassword = "ambipdebug"
+            storeType = "PKCS12"
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("sideload")
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(
